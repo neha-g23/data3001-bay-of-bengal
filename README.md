@@ -16,15 +16,15 @@
 
 **Data adequacy:** Both counts meet the brief's range, but it is only just above the minimums. Because hourly data from one drifter are strongly autocorrelated, the effective sample is closer to 388 drifters than 866,511 rows. We therefore focus on seasonal maps and flag cells with insufficient coverage rather than over-interpret them without success.
 
-## Significance of the Project
+## 3.Significance of the Project
 
-## Intro Background and Existing Studies 
+## 4.Intro Background and Existing Studies 
 
-## Proposed Method
+## 5.Proposed Method
 
-## Initial analysis and visualisation
+## 6.Initial analysis and visualisation
 
-## Timeline Plan
+## 7.Timeline Plan
 | Phase / Milestone | Target Date | Key Deliverables & Focus |
 | :--- | :--- | :--- |
 | **Phase 1: Setup & Proposal** | Weeks 1–4 | Region R selection, data-adequacy validation, repository setup, and **Project Proposal / README** (15%, Due W4). |
