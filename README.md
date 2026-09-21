@@ -25,4 +25,10 @@
 ## Initial analysis and visualisation
 
 ## Timeline Plan
-
+| Phase / Milestone | Target Date | Key Deliverables & Focus |
+| :--- | :--- | :--- |
+| **Phase 1: Setup & Proposal** | Weeks 1–4 | Region R selection, data-adequacy validation, repository setup, and **Project Proposal / README** (15%, Due W4). |
+| **Phase 2: Baseline Climatology** | Weeks 4–5 | Extract velocity vectors (`ve`, `vn`), build initial 1° × 1° mean circulation maps, and deliver **Poster Session** (20%, W5). |
+| **Phase 3: Feedback & Decomposition** | Weeks 6–7 | Complete **Peer Review of Posters** (5%, W6), apply drogue-status filtering, and split velocity fields into Southwest/Northeast monsoon seasons. |
+| **Phase 4: Uncertainty & Weighting** | Weeks 8–9 | Calculate cell-by-cell standard errors (\\(SE = \frac{\sigma}{\sqrt{N}}\\)), spatial variance, and apply post-stratification to unweight drifter convergence traps. |
+| **Phase 5: Presentation & Final Report** | Weeks 10–11 | Deliver **Group Presentation** (25%, W10), export standardized climatology dataset, and submit **Final Report** (40%, W11). |
