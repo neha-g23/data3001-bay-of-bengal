@@ -2,12 +2,12 @@
 ## 1. Research Question and Objective 
 ## 2. Region and Data
 
-**Region R:** Bay of Bengal, **5°N–23°N, 78°E–99°E** (excludes the equator).
+**Region R:** Bay of Bengal, **5°N–23°N, 78°E–99°E**.
 
 * **Dataset**: NOAA GDP 1-hourly dataset (`gdp1h`, Elipot et al., 2016) accessed via `clouddrift`.
 * **Variables**: `id` (drifter buoy ID), `time` (1-hourly timestamp), `latitude` (°N), `longitude` (°E), `ve` (eastward velocity, m/s), `vn` (northward velocity, m/s), `drogue_presence` (boolean sea-anchor status).
 
-| Measure | Value | Brief's acceptable range |
+| Measure | Value | Acceptable range |
 |---|---|---|
 | Global hourly observations | 197,214,787 | – |
 | Bay of Bengal observations | 866,511 (≈0.44% of global observations) | 0.8–3.9 million  |
