@@ -2,39 +2,49 @@ import os
 import clouddrift as cd
 from clouddrift.ragged import subset
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 import pandas as pd
 import numpy as np
 
 
+# ============================================================
+# 1. Load Bay of Bengal (BoB) subset, caching it to disk
+# ============================================================
+# gdp1h() streams the full global drifter dataset, so the BoB subset is
+# computed once and saved locally; later runs just load the cached file.
+# Delete bob_subset.nc if the region bounds below ever change.
 
 cache_path = "bob_subset.nc"
 
 if os.path.exists(cache_path):
-    # Already computed before — just load it
     print("Loading cached subset...")
     import xarray as xr
     ds_bob = xr.open_dataset(cache_path)
 else:
-    # First time — compute it and save
     print("Computing subset (this will take a few mins)...")
     ds = cd.datasets.gdp1h()
     ds_bob = subset(
-        ds, 
-        {"lat": (5.0, 23.0), "lon": (78.0, 99.0)}, 
+        ds,
+        {"lat": (5.0, 23.0), "lon": (78.0, 99.0)},
         row_dim_name="traj"
     )
-    ds_bob.load()  # pull it fully into memory before saving
+    ds_bob.load()  # pull fully into memory before saving to netCDF
     ds_bob.to_netcdf(cache_path)
     print("Saved subset to disk.")
 
-# num of observations: 866511
 print(f"Bay of Bengal observations: {ds_bob.sizes['obs']}")
 
-# num of diff drifters: 388
 n_drifters = ds_bob.sizes['traj']
 print(f"Number of distinct drifters: {n_drifters}")
 
-# Make a density map / count observations per grid cell. also shows spatial coverage
+
+# ============================================================
+# 2. Observation density map (spatial coverage)
+# ============================================================
+# Raw observation counts per grid cell. Note: this reflects sampling
+# effort as much as the underlying circulation, so it's not on its own
+# evidence of "good coverage" — see the unique-drifter map further down.
+
 print("DENSITY MAP/SPATIAL COVERAGE\n")
 
 lon = ds_bob.lon.values
@@ -67,32 +77,35 @@ plt.xlabel("Longitude")
 plt.ylabel("Latitude")
 plt.title("Drifter Observation Density: Bay of Bengal")
 
-plt.show()
+# plt.show()
 
-# decent seasonal coverage
-# Pull time into a dataframe
+
+# ============================================================
+# 3. Seasonal coverage (observations per month)
+# ============================================================
+
 print("SEASONAL COVERAGE\n")
 df_time = ds_bob[["time"]].to_dataframe().reset_index()
 
-# Extract month from each observation's timestamp
 df_time["month"] = pd.to_datetime(df_time["time"]).dt.month
 
-# Count observations per month
 monthly_counts = df_time["month"].value_counts().sort_index()
 print(monthly_counts)
 
-# Plot it
 plt.figure(figsize=(10, 5))
 monthly_counts.plot(kind="bar", color="steelblue")
 plt.xlabel("Month")
 plt.ylabel("Number of Observations")
 plt.title("Seasonal Coverage: Observations per Month — Bay of Bengal")
 plt.xticks(rotation=0)
-plt.show()
+# plt.show()
 
 
+# ============================================================
+# 4. Data quality checks
+# ============================================================
+# Core measurements + uncertainty + quality flags + drogue status.
 
-# Core measurements + uncertainty + quality flags + drogue status
 cols = [
     "time", "lat", "lon",
     "ve", "vn", "err_ve", "err_vn",
@@ -103,25 +116,24 @@ cols = [
 
 df = ds_bob[cols].to_dataframe()
 
-# Missing value counts
 missing_counts = df.isna().sum()
 print("Missing value counts:\n", missing_counts)
 
 missing_pct = (df.isna().sum() / len(df)) * 100
 print("\nMissing value %:\n", missing_pct)
 
-# Summary stats — check for suspicious fill values (e.g. -999) or unrealistic ranges
+# Check for suspicious fill values (e.g. -999) or unrealistic ranges
 print("\nSummary stats:\n", df.describe())
 
-# Quality flag breakdowns
 print("\nflg_sst counts:\n", df["flg_sst"].value_counts())
 print("\ndrogue_status counts:\n", df["drogue_status"].value_counts())
 
-# Check for outliers 
 
-#### moonsoon obs
+# ============================================================
+# 5. Monsoon labeling + observation coverage by monsoon
+# ============================================================
 
-print("\n\nMOONSOON")
+print("\n\nMONSOON\n")
 df_time = ds_bob[["time"]].to_dataframe().reset_index()
 df_time["month"] = pd.to_datetime(df_time["time"]).dt.month
 
@@ -143,12 +155,13 @@ monsoon_counts.plot(kind="bar", color=["coral", "steelblue", "lightgray"])
 plt.ylabel("Number of Observations")
 plt.title("Observation Coverage by Monsoon Period — Bay of Bengal")
 plt.xticks(rotation=15)
-plt.show()
-
-#########
+# plt.show()
 
 
-#obs per year
+# ============================================================
+# 6. Observations per year
+# ============================================================
+
 df_time["year"] = pd.to_datetime(df_time["time"]).dt.year
 
 yearly_counts = df_time["year"].value_counts().sort_index()
@@ -164,21 +177,24 @@ plt.title("Bay of Bengal Drifter Observations by Year")
 
 plt.xticks(rotation=45)
 plt.tight_layout()
-plt.show()
+# plt.show()
 
-# drouged vs undrouged
+
+# ============================================================
+# 7. Drogue status: overall and by monsoon
+# ============================================================
+# drogue_status = True means the drifter's sea anchor was still attached;
+# once lost, the buoy becomes more wind-driven than current-driven.
+
 print(df["drogue_status"].value_counts(dropna=False))
 
-#calc percentGES
 drogue_counts = df["drogue_status"].value_counts(dropna=False)
-
 drogue_pct = drogue_counts / len(df) * 100
 
 print(drogue_counts)
 print(drogue_pct)
 
 df["month"] = pd.to_datetime(df["time"]).dt.month
-
 df["monsoon"] = df["month"].apply(get_monsoon)
 
 print(pd.crosstab(df["monsoon"], df["drogue_status"]))
@@ -198,7 +214,6 @@ drogue_by_monsoon = pd.crosstab(
     normalize="index"
 ) * 100
 
-# Rename columns so legend is readable
 drogue_by_monsoon = drogue_by_monsoon.rename(
     columns={
         False: "Non-drogued",
@@ -206,14 +221,12 @@ drogue_by_monsoon = drogue_by_monsoon.rename(
     }
 )
 
-# Shorter labels for the figure
 drogue_by_monsoon.index = [
     "Inter-monsoon",
     "Northeast",
     "Southwest"
 ]
 
-# Plot
 ax = drogue_by_monsoon.plot(
     kind="bar",
     stacked=True,
@@ -228,16 +241,52 @@ plt.legend(title="Drogue Status", bbox_to_anchor=(1.02, 1))
 plt.tight_layout()
 
 plt.show()
-# ##############################
 
-#TRajectorid
+
+# ============================================================
+# 8. Drogue effect on current speed (diagnostic)
+# ============================================================
+# Quick check before filtering: does losing the drogue visibly change the
+# current signal? If undrogued speeds run higher/more spread out, that
+# supports treating undrogued velocities as wind-contaminated rather than
+# a clean current measurement — the justification for filtering in
+# section 13.
+
+print("\nDROGUE EFFECT ON CURRENT SPEED\n")
+
+speed_df = ds_bob[["ve", "vn", "drogue_status"]].to_dataframe().dropna(
+    subset=["ve", "vn"]
+)
+speed_df["speed"] = np.sqrt(speed_df["ve"]**2 + speed_df["vn"]**2)
+
+print(
+    speed_df.groupby("drogue_status")["speed"]
+    .describe()[["count", "mean", "std", "50%", "max"]]
+)
+
+ax = speed_df.boxplot(
+    column="speed",
+    by="drogue_status",
+    showfliers=False,
+    figsize=(7, 5)
+)
+ax.set_xlabel("Drogue Attached")
+ax.set_ylabel("Current Speed (m/s)")
+ax.set_title("Current Speed by Drogue Status")
+plt.suptitle("")
+plt.show()
+
+
+# ============================================================
+# 9. Trajectory map
+# ============================================================
+# Walks the ragged array by rowsize to plot each drifter's full track,
+# marking its first fix (entry point into the region) in red.
 
 print("TRAJECTORY MAP\n")
 
-# We need the ragged trajectory sizes
 rowsize = ds_bob["rowsize"].values
 
-# Observation coordinates
 lon = ds_bob["lon"].values
 lat = ds_bob["lat"].values
 
@@ -284,28 +333,33 @@ plt.title("Drifter Trajectories and Regional Entry Points: Bay of Bengal")
 
 plt.grid(alpha=0.2)
 plt.tight_layout()
-plt.show()
+# plt.show()
 
 
-##naive 
+# ============================================================
+# 10. Naive seasonal circulation map (Southwest vs Northeast)
+# ============================================================
+# "Naive" because it averages ve/vn per grid cell directly, without
+# weighting by drifter — a cell full of one looping drifter counts the
+# same as a cell sampled by many. See section 13 for the corrected,
+# drifter-weighted, drogue-filtered version.
 
 print("\nNAIVE MONSOON CIRCULATION MAPS\n")
 
 # --------------------------------------------------
-# 1. Make a dataframe with the variables we need
+# 10.1 Build a dataframe with the variables we need
 # --------------------------------------------------
 
 currents = ds_bob[
     ["time", "lat", "lon", "ve", "vn"]
 ].to_dataframe().reset_index()
 
-# Remove observations with missing current/location data
 currents = currents.dropna(
     subset=["time", "lat", "lon", "ve", "vn"]
 )
 
 # --------------------------------------------------
-# 2. Label each observation by monsoon
+# 10.2 Label each observation by monsoon
 # --------------------------------------------------
 
 currents["month"] = pd.to_datetime(currents["time"]).dt.month
@@ -326,7 +380,7 @@ currents = currents[
 ]
 
 # --------------------------------------------------
-# 3. Create a 1° x 1° spatial grid
+# 10.3 Create a 1° x 1° spatial grid
 # --------------------------------------------------
 
 grid_size = 1.0
@@ -347,7 +401,7 @@ currents["lon_bin"] = pd.cut(
 )
 
 # --------------------------------------------------
-# 4. Calculate average current in each grid cell
+# 10.4 Average current in each grid cell
 # --------------------------------------------------
 
 grid = (
@@ -364,7 +418,6 @@ grid = (
     .reset_index()
 )
 
-# Centre coordinates of each grid cell
 grid["lat_center"] = grid["lat_bin"].apply(
     lambda x: x.mid
 ).astype(float)
@@ -374,7 +427,7 @@ grid["lon_center"] = grid["lon_bin"].apply(
 ).astype(float)
 
 # --------------------------------------------------
-# 5. Only show cells with enough observations
+# 10.5 Only show cells with enough observations
 # --------------------------------------------------
 
 min_obs = 20
@@ -385,7 +438,7 @@ print("\nCells remaining after minimum observation threshold:")
 print(grid.groupby("monsoon").size())
 
 # --------------------------------------------------
-# 6. Plot Southwest vs Northeast
+# 10.6 Plot Southwest vs Northeast
 # --------------------------------------------------
 
 fig, axes = plt.subplots(
@@ -398,7 +451,7 @@ fig, axes = plt.subplots(
 
 vmax = 0
 
-# Find common max speed across both monsoons
+# Find common max speed across both monsoons, for a shared color scale
 for season in ["Southwest", "Northeast"]:
     season_data = grid[grid["monsoon"] == season].copy()
     speed = np.sqrt(season_data["mean_ve"]**2 + season_data["mean_vn"]**2)
@@ -422,7 +475,7 @@ for ax, season in zip(axes, ["Southwest", "Northeast"]):
         season_data["u_norm"],
         season_data["v_norm"],
         speed,
-        cmap="turbo",   # changed from viridis
+        cmap="turbo",
         angles="xy",
         scale=25,
         width=0.003,
@@ -436,7 +489,6 @@ for ax, season in zip(axes, ["Southwest", "Northeast"]):
     ax.set_title(f"{season} Monsoon")
     ax.grid(alpha=0.2)
 
-# Add one shared colorbar
 cbar = fig.colorbar(
     q,
     ax=axes,
@@ -448,28 +500,33 @@ cbar.set_label("Mean Current Speed")
 
 fig.suptitle("Mean Surface Current Direction and Speed: Bay of Bengal", fontsize=16)
 
-plt.show()
+# plt.show()
 
+
+# ============================================================
+# 11. Observations and unique drifters per monsoon
+# ============================================================
 
 print("\nOBSERVATIONS AND DRIFTERS PER MONSOON\n")
 
-# ---------------------------------------
-# 1. Give every observation its drifter ID
-# ---------------------------------------
+# --------------------------------------------------
+# 11.1 Give every observation its drifter ID
+# --------------------------------------------------
+# rowsize gives the number of observations belonging to each drifter, and
+# observations are stored contiguously in drifter order, so repeating each
+# drifter id by its rowsize attaches it correctly to every observation.
 
 drifter_ids = np.repeat(
     ds_bob["id"].values,
     ds_bob["rowsize"].values.astype(int)
 )
 
-# Check it matches number of observations
 print("Observation rows:", ds_bob.sizes["obs"])
 print("Drifter ID rows:", len(drifter_ids))
 
-
-# ---------------------------------------
-# 2. Create dataframe
-# ---------------------------------------
+# --------------------------------------------------
+# 11.2 Build dataframe and label monsoon period
+# --------------------------------------------------
 
 season_df = pd.DataFrame({
     "time": ds_bob["time"].values,
@@ -479,11 +536,6 @@ season_df = pd.DataFrame({
 season_df["month"] = pd.to_datetime(
     season_df["time"]
 ).dt.month
-
-
-# ---------------------------------------
-# 3. Label monsoon period
-# ---------------------------------------
 
 def get_monsoon(month):
     if month in [6, 7, 8, 9]:
@@ -495,10 +547,9 @@ def get_monsoon(month):
 
 season_df["monsoon"] = season_df["month"].apply(get_monsoon)
 
-
-# ---------------------------------------
-# 4. Count observations AND unique drifters
-# ---------------------------------------
+# --------------------------------------------------
+# 11.3 Count observations AND unique drifters per monsoon
+# --------------------------------------------------
 
 monsoon_summary = (
     season_df
@@ -510,3 +561,2089 @@ monsoon_summary = (
 )
 
 print(monsoon_summary)
+
+
+# ============================================================
+# 12. Unique drifters per grid cell (coverage map)
+# ============================================================
+# Counts distinct drifters rather than raw observations, since a single
+# looping drifter can inflate observation counts without adding real
+# independent coverage. Uses the same 50x50 grid as the density map.
+
+print("\nUNIQUE DRIFTERS PER GRID CELL\n")
+
+drifter_ids = np.repeat(
+    ds_bob["id"].values,
+    ds_bob["rowsize"].values.astype(int)
+)
+
+drifter_df = pd.DataFrame({
+    "lon": ds_bob["lon"].values,
+    "lat": ds_bob["lat"].values,
+    "drifter_id": drifter_ids
+})
+
+# xedges/yedges came from the density map's histogram2d(lon, lat, bins=50)
+drifter_df["lon_bin"] = pd.cut(
+    drifter_df["lon"],
+    bins=xedges,
+    include_lowest=True,
+    labels=False
+)
+
+drifter_df["lat_bin"] = pd.cut(
+    drifter_df["lat"],
+    bins=yedges,
+    include_lowest=True,
+    labels=False
+)
+
+unique_counts = (
+    drifter_df
+    .groupby(["lon_bin", "lat_bin"])["drifter_id"]
+    .nunique()
+)
+
+unique_grid = np.zeros(
+    (len(xedges) - 1, len(yedges) - 1)
+)
+
+for (lon_bin, lat_bin), count in unique_counts.items():
+    unique_grid[int(lon_bin), int(lat_bin)] = count
+
+plot_unique = unique_grid.copy()
+
+# Cells with no drifters plot as NaN (shown grey) rather than 0
+plot_unique[plot_unique == 0] = np.nan
+
+cmap = plt.cm.YlGnBu.copy()
+cmap.set_bad("lightgrey")
+
+plt.figure(figsize=(10, 8))
+
+im = plt.pcolormesh(
+    xedges,
+    yedges,
+    plot_unique.T,
+    cmap=cmap,
+    shading="auto"
+)
+
+plt.colorbar(
+    im,
+    label="Number of Unique Drifters per Cell"
+)
+
+plt.xlabel("Longitude")
+plt.ylabel("Latitude")
+plt.title("Unique Drifter Coverage: Bay of Bengal")
+
+# plt.show()
+
+
+# ============================================================
+# 13. Drifter-weighted seasonal circulation map: all data vs drogued-only
+# ============================================================
+# Corrects the naive map in section 10: averages within each drifter per
+# cell first, then across drifters, so one heavily-sampled drifter can't
+# dominate a cell's mean current. Also compares the full dataset against a
+# drogued-only subset, since post-drogue-loss velocities are wind-driven
+# rather than current-driven (see section 8's speed diagnostic). Cells
+# below a minimum drifter count are shaded as "insufficient data" instead
+# of being silently dropped.
+
+print("\nDRIFTER-WEIGHTED MONSOON CIRCULATION: ALL DATA VS DROGUED-ONLY\n")
+
+# --------------------------------------------------
+# 13.1 Attach a drifter ID to every observation
+# --------------------------------------------------
+
+drifter_ids = np.repeat(
+    ds_bob["id"].values,
+    ds_bob["rowsize"].values.astype(int)
+)
+
+currents = pd.DataFrame({
+    "time": ds_bob["time"].values,
+    "lat": ds_bob["lat"].values,
+    "lon": ds_bob["lon"].values,
+    "ve": ds_bob["ve"].values,
+    "vn": ds_bob["vn"].values,
+    "drogue_status": ds_bob["drogue_status"].values,
+    "drifter_id": drifter_ids
+})
+
+currents = currents.dropna(
+    subset=["time", "lat", "lon", "ve", "vn"]
+)
+
+# --------------------------------------------------
+# 13.2 Label monsoon period
+# --------------------------------------------------
+
+currents["month"] = pd.to_datetime(currents["time"]).dt.month
+
+def get_monsoon(month):
+    if month in [6, 7, 8, 9]:
+        return "Southwest"
+    elif month in [12, 1, 2]:
+        return "Northeast"
+    else:
+        return "Inter-monsoon"
+
+currents["monsoon"] = currents["month"].apply(get_monsoon)
+
+# Only SW and NE for the main comparison
+currents = currents[
+    currents["monsoon"].isin(["Southwest", "Northeast"])
+].copy()
+
+# --------------------------------------------------
+# 13.3 Create 1° x 1° grid
+# --------------------------------------------------
+
+grid_size = 1.0
+
+lat_bins = np.arange(5, 23 + grid_size, grid_size)
+lon_bins = np.arange(78, 99 + grid_size, grid_size)
+
+currents["lat_bin"] = pd.cut(
+    currents["lat"],
+    bins=lat_bins,
+    include_lowest=True
+)
+
+currents["lon_bin"] = pd.cut(
+    currents["lon"],
+    bins=lon_bins,
+    include_lowest=True
+)
+
+# Drogued-only subset, same bins as above
+currents_drogued = currents[currents["drogue_status"]].copy()
+
+# --------------------------------------------------
+# 13.4 Drifter-weighted grid: average within each drifter first, then
+#      across drifters. Reused for both the all-data and drogued-only
+#      subsets so the two comparisons follow an identical procedure.
+# --------------------------------------------------
+
+def build_drifter_weighted_grid(currents_subset):
+    drifter_cell = (
+        currents_subset
+        .groupby(
+            ["monsoon", "lat_bin", "lon_bin", "drifter_id"],
+            observed=True
+        )
+        .agg(
+            drifter_ve=("ve", "mean"),
+            drifter_vn=("vn", "mean"),
+            drifter_obs=("ve", "count")
+        )
+        .reset_index()
+    )
+
+    cell_grid = (
+        drifter_cell
+        .groupby(
+            ["monsoon", "lat_bin", "lon_bin"],
+            observed=True
+        )
+        .agg(
+            mean_ve=("drifter_ve", "mean"),
+            mean_vn=("drifter_vn", "mean"),
+            n_drifters=("drifter_id", "nunique"),
+            n_obs=("drifter_obs", "sum")
+        )
+        .reset_index()
+    )
+
+    cell_grid["lat_center"] = cell_grid["lat_bin"].apply(lambda x: x.mid).astype(float)
+    cell_grid["lon_center"] = cell_grid["lon_bin"].apply(lambda x: x.mid).astype(float)
+
+    return cell_grid, drifter_cell  # now returns both
+
+grid_all, drifter_cell_all = build_drifter_weighted_grid(currents)
+grid_drogued, drifter_cell_drogued = build_drifter_weighted_grid(currents_drogued)
+
+# --------------------------------------------------
+# 13.5 Coverage threshold sensitivity check — run separately for each
+#      subset, since drogue-filtering removes drifters and can push
+#      cells that cleared the threshold on all-data below it.
+# --------------------------------------------------
+
+min_drifters_options = [1, 3, 5, 10]
+
+def apply_coverage_threshold(cell_grid, chosen_min_drifters, label):
+    print(f"\nCOVERAGE THRESHOLD SENSITIVITY — {label}\n")
+
+    sensitivity_rows = []
+    for candidate in min_drifters_options:
+        retained = cell_grid[cell_grid["n_drifters"] >= candidate]
+        counts = retained.groupby("monsoon").size()
+        sensitivity_rows.append({
+            "min_drifters": candidate,
+            "Southwest_cells": counts.get("Southwest", 0),
+            "Northeast_cells": counts.get("Northeast", 0),
+        })
+    print(pd.DataFrame(sensitivity_rows).set_index("min_drifters"))
+
+    filtered = cell_grid[cell_grid["n_drifters"] >= chosen_min_drifters].copy()
+    below_threshold = cell_grid[cell_grid["n_drifters"] < chosen_min_drifters].copy()
+
+    print(f"\nCells retained at min_drifters = {chosen_min_drifters} ({label}):")
+    print(
+        filtered.groupby("monsoon")
+        .agg(
+            cells=("mean_ve", "size"),
+            mean_drifters_per_cell=("n_drifters", "mean"),
+            min_drifters=("n_drifters", "min"),
+            max_drifters=("n_drifters", "max")
+        )
+    )
+    return filtered, below_threshold
+
+# Chosen threshold — revisit if either sensitivity table above shows a
+# steep drop-off before this point (see CLAUDE.md "Sampling-bias handling").
+min_drifters = 3
+
+grid_filtered_all, insufficient_all = apply_coverage_threshold(
+    grid_all, min_drifters, "ALL DATA"
+)
+grid_filtered_drogued, insufficient_drogued = apply_coverage_threshold(
+    grid_drogued, min_drifters, "DROGUED ONLY"
+)
+
+# --------------------------------------------------
+# 13.6 Calculate speed + normalized direction
+# --------------------------------------------------
+
+def add_speed_and_direction(filtered_grid):
+    filtered_grid = filtered_grid.copy()
+    filtered_grid["speed"] = np.sqrt(
+        filtered_grid["mean_ve"]**2 + filtered_grid["mean_vn"]**2
+    )
+    filtered_grid = filtered_grid[filtered_grid["speed"] > 0].copy()
+    filtered_grid["u_norm"] = filtered_grid["mean_ve"] / filtered_grid["speed"]
+    filtered_grid["v_norm"] = filtered_grid["mean_vn"] / filtered_grid["speed"]
+    return filtered_grid
+
+grid_filtered_all = add_speed_and_direction(grid_filtered_all)
+grid_filtered_drogued = add_speed_and_direction(grid_filtered_drogued)
+
+# --------------------------------------------------
+# 13.7 Plot: rows = all data / drogued-only, columns = SW / NE
+# --------------------------------------------------
+
+def plot_season_quiver(ax, season_data, season_insufficient, vmin, vmax, title):
+    # Shade sampled-but-below-threshold cells grey/hatched rather than
+    # leaving them blank, so "insufficient data" reads as a deliberate
+    # result rather than a gap in the plot.
+    for _, cell in season_insufficient.iterrows():
+        ax.add_patch(Rectangle(
+            (cell["lon_center"] - grid_size / 2, cell["lat_center"] - grid_size / 2),
+            grid_size,
+            grid_size,
+            facecolor="lightgrey",
+            edgecolor="none",
+            hatch="//",
+            alpha=0.5,
+            zorder=0
+        ))
+
+    q = ax.quiver(
+        season_data["lon_center"],
+        season_data["lat_center"],
+        season_data["u_norm"],
+        season_data["v_norm"],
+        season_data["speed"],
+        cmap="plasma",
+        clim=(vmin, vmax),
+        angles="xy",
+        scale=25,
+        width=0.003
+    )
+
+    ax.set_xlim(78, 99)
+    ax.set_ylim(5, 23)
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title(title)
+    ax.grid(alpha=0.2)
+
+    return q
+
+fig, axes = plt.subplots(
+    2, 2,
+    figsize=(15, 13),
+    sharex=True,
+    sharey=True,
+    constrained_layout=True
+)
+
+# Same speed scale across all four panels
+vmin = min(grid_filtered_all["speed"].min(), grid_filtered_drogued["speed"].min())
+vmax = max(grid_filtered_all["speed"].max(), grid_filtered_drogued["speed"].max())
+
+row_specs = [
+    ("All Data", grid_filtered_all, insufficient_all, axes[0]),
+    ("Drogued Only", grid_filtered_drogued, insufficient_drogued, axes[1]),
+]
+
+q = None
+
+for row_label, filtered_grid, below_threshold, row_axes in row_specs:
+    for ax, season in zip(row_axes, ["Southwest", "Northeast"]):
+        season_data = filtered_grid[filtered_grid["monsoon"] == season]
+        season_insufficient = below_threshold[below_threshold["monsoon"] == season]
+
+        q = plot_season_quiver(
+            ax, season_data, season_insufficient, vmin, vmax,
+            f"{row_label} — {season} Monsoon"
+        )
+
+insufficient_patch = Rectangle(
+    (0, 0), 1, 1,
+    facecolor="lightgrey",
+    edgecolor="none",
+    hatch="//",
+    alpha=0.5,
+    label=f"Insufficient data (<{min_drifters} drifters)"
+)
+axes[0][0].legend(handles=[insufficient_patch], loc="upper left", fontsize=8)
+
+cbar = fig.colorbar(
+    q,
+    ax=axes,
+    location="right",
+    shrink=0.8,
+    pad=0.03
+)
+
+cbar.set_label("Mean Current Speed")
+
+fig.suptitle(
+    "Drifter-Weighted Mean Surface Circulation: All Data vs Drogued-Only",
+    fontsize=16
+)
+
+plt.show()
+
+
+# Build observation table with drifter id and drogue status
+ids = np.repeat(ds_bob["id"].values, ds_bob["rowsize"].values.astype(int))
+cur = pd.DataFrame({
+    "time": ds_bob["time"].values,
+    "lat": ds_bob["lat"].values,
+    "lon": ds_bob["lon"].values,
+    "ve": ds_bob["ve"].values,
+    "vn": ds_bob["vn"].values,
+    "drogue": ds_bob["drogue_status"].values,
+    "drifter_id": ids,
+}).dropna(subset=["time", "lat", "lon", "ve", "vn"])
+
+month = pd.to_datetime(cur["time"]).dt.month
+cur["monsoon"] = np.where(month.isin([6, 7, 8, 9]), "SW",
+                  np.where(month.isin([12, 1, 2]), "NE", "other"))
+cur = cur[cur["monsoon"].isin(["SW", "NE"])].copy()
+
+# 1-degree cells
+cur["lat_bin"] = np.floor(cur["lat"])
+cur["lon_bin"] = np.floor(cur["lon"])
+
+def drifter_weighted(d, min_drifters=3):
+    # average within each drifter first, then across drifters
+    per = (d.groupby(["monsoon", "lat_bin", "lon_bin", "drifter_id"])
+             .agg(ve=("ve", "mean"), vn=("vn", "mean")).reset_index())
+    g = (per.groupby(["monsoon", "lat_bin", "lon_bin"])
+            .agg(ve=("ve", "mean"), vn=("vn", "mean"), n=("drifter_id", "nunique"))
+            .reset_index())
+    return g[g["n"] >= min_drifters]
+
+dr = drifter_weighted(cur[cur["drogue"]])     # drogued only
+un = drifter_weighted(cur[~cur["drogue"]])    # undrogued only
+allg = drifter_weighted(cur)                  # everything
+
+m = dr.merge(un, on=["monsoon", "lat_bin", "lon_bin"], suffixes=("_dr", "_un"))
+ang_dr = np.degrees(np.arctan2(m["vn_dr"], m["ve_dr"]))
+ang_un = np.degrees(np.arctan2(m["vn_un"], m["ve_un"]))
+m["angle_diff"] = np.abs((ang_un - ang_dr + 180) % 360 - 180)   # 0 to 180 degrees
+
+print("Shared cells per season:\n", m.groupby("monsoon").size())
+print(m.groupby("monsoon")["angle_diff"].describe())
+
+def reversed_fraction(g):
+    sw = g[g["monsoon"] == "SW"].set_index(["lat_bin", "lon_bin"])
+    ne = g[g["monsoon"] == "NE"].set_index(["lat_bin", "lon_bin"])
+    b = sw[["ve", "vn"]].join(ne[["ve", "vn"]], lsuffix="_sw", rsuffix="_ne", how="inner")
+    dot = b["ve_sw"] * b["ve_ne"] + b["vn_sw"] * b["vn_ne"]
+    return len(b), (dot < 0).mean()
+
+# for name, g in [("drogued only", dr), ("undrogued only", un), ("all data", allg)]:
+#     n, frac = reversed_fraction(g)
+#     print(f"{name}: {n} cells with both seasons, {frac*100:.1f}% reversed")
+
+
+rng = np.random.default_rng(0)
+
+def reversed_frac(per, min_drifters=3):
+    p = per.assign(wve=per["ve"] * per["w"], wvn=per["vn"] * per["w"])
+    g = (p.groupby(["monsoon", "lat_bin", "lon_bin"])
+           .agg(wve=("wve", "sum"), wvn=("wvn", "sum"), w=("w", "sum"),
+                n=("drifter_id", "size")).reset_index())
+    g = g[g["n"] >= min_drifters]
+    g["ve"], g["vn"] = g["wve"] / g["w"], g["wvn"] / g["w"]
+    sw = g[g["monsoon"] == "SW"].set_index(["lat_bin", "lon_bin"])
+    ne = g[g["monsoon"] == "NE"].set_index(["lat_bin", "lon_bin"])
+    b = sw[["ve", "vn"]].join(ne[["ve", "vn"]], lsuffix="_sw", rsuffix="_ne", how="inner")
+    return ((b["ve_sw"] * b["ve_ne"] + b["vn_sw"] * b["vn_ne"]) < 0).mean()
+
+def bootstrap_ci(d, n_boot=500):
+    per = (d.groupby(["monsoon", "lat_bin", "lon_bin", "drifter_id"])
+             .agg(ve=("ve", "mean"), vn=("vn", "mean")).reset_index())
+    ids = per["drifter_id"].unique()
+    out = []
+    for _ in range(n_boot):
+        w = pd.Series(rng.choice(ids, size=len(ids))).value_counts().rename("w")
+        pb = per.merge(w, left_on="drifter_id", right_index=True)
+        out.append(reversed_frac(pb))
+    return np.nanpercentile(out, [2.5, 50, 97.5])
+
+# for name, d in [("drogued only", cur[cur["drogue"]]),
+#                 ("undrogued only", cur[~cur["drogue"]]),
+#                 ("all data", cur)]:
+#     lo, med, hi = bootstrap_ci(d)
+#     print(f"{name}: {med*100:.1f}% reversed (95% CI {lo*100:.1f}-{hi*100:.1f}%)")
+
+
+def bootstrap_ci(d, min_drifters=3, n_boot=500):
+    per = (d.groupby(["monsoon", "lat_bin", "lon_bin", "drifter_id"])
+             .agg(ve=("ve", "mean"), vn=("vn", "mean")).reset_index())
+    ids = per["drifter_id"].unique()
+    out = []
+    for _ in range(n_boot):
+        w = pd.Series(rng.choice(ids, size=len(ids))).value_counts().rename("w")
+        pb = per.merge(w, left_on="drifter_id", right_index=True)
+        out.append(reversed_frac(pb, min_drifters))
+    return np.nanpercentile(out, [2.5, 50, 97.5])
+
+for k in [3, 5]:
+    lo, med, hi = bootstrap_ci(cur[cur["drogue"]], min_drifters=k)
+    print(f"drogued only, min_drifters={k}: {med*100:.1f}% (95% CI {lo*100:.1f}-{hi*100:.1f}%)")
+
+
+m = allg.merge(dr, on=["monsoon", "lat_bin", "lon_bin"], suffixes=("_all", "_dr"))
+
+# Speed in each version
+m["speed_all"] = np.sqrt(m["ve_all"]**2 + m["vn_all"]**2)
+m["speed_dr"] = np.sqrt(m["ve_dr"]**2 + m["vn_dr"]**2)
+
+# Vector difference magnitude (how far apart the two arrows are, in m/s)
+m["vec_diff"] = np.sqrt((m["ve_all"] - m["ve_dr"])**2 + (m["vn_all"] - m["vn_dr"])**2)
+
+# As a percentage of the all-data speed, so it's comparable across fast/slow regions
+m["pct_diff"] = m["vec_diff"] / m["speed_all"] * 100
+
+print(m.groupby("monsoon")[["vec_diff", "pct_diff"]].describe())
+
+
+print("Speed correlation (all-data vs drogued-only):", m["speed_all"].corr(m["speed_dr"]))
+
+# --------------------------------------------------
+# 1. Merge the two grids on shared cells
+# --------------------------------------------------
+
+m = allg.merge(dr, on=["monsoon", "lat_bin", "lon_bin"], suffixes=("_all", "_dr"))
+
+print(f"Shared cells: {len(m)}")
+print(m.groupby("monsoon").size())
+
+# --------------------------------------------------
+# 2. Speed in each version, and % speed difference
+# --------------------------------------------------
+
+m["speed_all"] = np.sqrt(m["ve_all"]**2 + m["vn_all"]**2)
+m["speed_dr"]  = np.sqrt(m["ve_dr"]**2  + m["vn_dr"]**2)
+
+m["pct_diff"] = np.abs(m["speed_all"] - m["speed_dr"]) / m["speed_all"] * 100
+
+# --------------------------------------------------
+# 3. Direction difference (angle between the two vectors)
+# --------------------------------------------------
+
+m["angle_all"] = np.degrees(np.arctan2(m["vn_all"], m["ve_all"]))
+m["angle_dr"]  = np.degrees(np.arctan2(m["vn_dr"],  m["ve_dr"]))
+m["angle_diff"] = np.abs((m["angle_dr"] - m["angle_all"] + 180) % 360 - 180)
+
+print("\nSpeed and direction difference summary:")
+print(m.groupby("monsoon")[["pct_diff", "angle_diff"]].describe())
+
+# --------------------------------------------------
+# 4. Overall speed correlation (all-data vs drogued-only)
+# --------------------------------------------------
+
+print("\nSpeed correlation (all-data vs drogued-only):",
+      m["speed_all"].corr(m["speed_dr"]))
+
+# --------------------------------------------------
+# 5. Does the difference shrink with more drogued drifters?
+#    (rules out "difference = just a noisy small sample")
+# --------------------------------------------------
+
+print("\nCorrelation: n_drogued_drifters vs % speed difference:",
+      m["n_dr"].corr(m["pct_diff"]))
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+axes[0].scatter(m["n_dr"], m["pct_diff"], alpha=0.5)
+axes[0].set_xlabel("Number of drogued drifters in cell")
+axes[0].set_ylabel("% speed difference")
+axes[0].set_title("Speed difference vs drogued sample size")
+
+axes[1].scatter(m["n_dr"], m["angle_diff"], alpha=0.5, color="orange")
+axes[1].set_xlabel("Number of drogued drifters in cell")
+axes[1].set_ylabel("Angle difference (degrees)")
+axes[1].set_title("Direction difference vs drogued sample size")
+
+plt.tight_layout()
+plt.show()
+
+# --------------------------------------------------
+# 6. Map of where the differences are largest
+# --------------------------------------------------
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+sc1 = axes[0].scatter(m["lon_bin"], m["lat_bin"], c=m["pct_diff"],
+                       cmap="RdYlGn_r", vmax=50)
+plt.colorbar(sc1, ax=axes[0], label="% speed difference")
+axes[0].set_title("Speed difference: all-data vs drogued-only")
+axes[0].set_xlabel("Longitude")
+axes[0].set_ylabel("Latitude")
+
+sc2 = axes[1].scatter(m["lon_bin"], m["lat_bin"], c=m["angle_diff"],
+                       cmap="RdYlGn_r", vmax=90)
+plt.colorbar(sc2, ax=axes[1], label="Direction difference (degrees)")
+axes[1].set_title("Direction difference: all-data vs drogued-only")
+axes[1].set_xlabel("Longitude")
+axes[1].set_ylabel("Latitude")
+
+plt.tight_layout()
+plt.show()
+
+# Correlation with everything
+# print("With outliers:", m["n_dr"].corr(m["pct_diff"]))
+
+# Correlation after removing the most extreme pct_diff values
+m_trimmed = m[m["pct_diff"] < m["pct_diff"].quantile(0.95)]  # drop top 5%
+# print("Without top 5% outliers:", m_trimmed["n_dr"].corr(m_trimmed["pct_diff"]))
+
+# for min_n in [3, 10, 15, 20, 25]:
+#     subset = m[m["n_dr"] >= min_n]
+#     print(f"\nmin_drifters = {min_n}: {len(subset)} cells")
+#     print(subset.groupby("monsoon")[["pct_diff", "angle_diff"]].median())
+
+speed = np.sqrt(currents["ve"]**2 + currents["vn"]**2)
+
+# for t in [1.5, 2.0, 2.5, 3.0, 3.5]:
+#     n = (speed > t).sum()
+#     print(f"Threshold {t} m/s: {n} rows above ({n/len(currents)*100:.3f}%)")
+
+def bootstrap_cell_uncertainty(drifter_cell, n_boot=500):
+    results = []
+    
+    for (monsoon, lat_bin, lon_bin), group in drifter_cell.groupby(
+        ["monsoon", "lat_bin", "lon_bin"], observed=True
+    ):
+        drifter_ve = group["drifter_ve"].values
+        drifter_vn = group["drifter_vn"].values
+        n = len(drifter_ve)
+        
+        if n < 3:
+            continue  # skip cells below your threshold anyway
+        
+        boot_ve = np.array([
+            np.mean(rng.choice(drifter_ve, size=n, replace=True))
+            for _ in range(n_boot)
+        ])
+        boot_vn = np.array([
+            np.mean(rng.choice(drifter_vn, size=n, replace=True))
+            for _ in range(n_boot)
+        ])
+        
+        results.append({
+            "monsoon": monsoon, "lat_bin": lat_bin, "lon_bin": lon_bin,
+            "mean_ve": drifter_ve.mean(), "mean_vn": drifter_vn.mean(),
+            "se_ve": boot_ve.std(), "se_vn": boot_vn.std(),
+            "n_drifters": n
+        })
+    
+    return pd.DataFrame(results)
+
+rng = np.random.default_rng(0)
+uncertainty_grid = bootstrap_cell_uncertainty(drifter_cell_drogued)
+def confidence_tier(n):
+    if n < 3:
+        return "insufficient"
+    elif n < 10:
+        return "low confidence"
+    else:
+        return "high confidence"
+
+uncertainty_grid["tier"] = uncertainty_grid["n_drifters"].apply(confidence_tier)
+
+# print(uncertainty_grid.head(20))
+# print(f"\nTotal cells with uncertainty estimates: {len(uncertainty_grid)}")
+# print(uncertainty_grid.groupby(["monsoon", "tier"]).size())
+
+# print(currents.columns.tolist())  # confirm what's actually in there right now, for reference
+
+# Add error columns straight from ds_bob (same length/order as your other observation arrays)
+currents_err = pd.DataFrame({
+    "err_ve": ds_bob["err_ve"].values,
+    "err_vn": ds_bob["err_vn"].values,
+})
+
+# print(currents_err.describe())
+
+for t in [0.1, 0.2, 0.5, 1.0]:
+    n = (currents_err["err_ve"] > t).sum()
+    print(f"err_ve > {t}: {n} rows ({n/len(currents_err)*100:.3f}%)")
+
+# Quick version — average err_ve per cell, compare to your bootstrap se_ve
+err_by_obs = pd.DataFrame({
+    "lat": ds_bob["lat"].values,
+    "lon": ds_bob["lon"].values,
+    "err_ve": ds_bob["err_ve"].values,
+})
+
+grid_size = 1.0
+lat_bins = np.arange(5, 23 + grid_size, grid_size)
+lon_bins = np.arange(78, 99 + grid_size, grid_size)
+
+err_by_obs["lat_bin"] = pd.cut(err_by_obs["lat"], bins=lat_bins, include_lowest=True)
+err_by_obs["lon_bin"] = pd.cut(err_by_obs["lon"], bins=lon_bins, include_lowest=True)
+
+cell_err = err_by_obs.groupby(["lat_bin", "lon_bin"], observed=True)["err_ve"].mean().reset_index()
+cell_err.columns = ["lat_bin", "lon_bin", "avg_obs_err_ve"]
+
+check = uncertainty_grid.merge(cell_err, on=["lat_bin", "lon_bin"], how="left")
+# print(check[["se_ve", "avg_obs_err_ve"]].describe())
+# print("Correlation:", check["se_ve"].corr(check["avg_obs_err_ve"]))
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# APPROXIMATE EICC / WESTERN BAY ANALYSIS
+# ============================================================
+
+# IMPORTANT:
+# This is only an approximate EICC region.
+# It is a longitude band in the western Bay, not a precise
+# coastline-following EICC mask.
+
+EICC_LON_MIN = 80.0
+EICC_LON_MAX = 85.0
+
+MIN_DRIFTERS = 3
+N_BOOT = 500
+
+
+# ============================================================
+# 1. SELECT THE APPROXIMATE EICC BAND FROM EXISTING GRIDS
+# ============================================================
+
+def in_eicc_band(grid, lon_min=EICC_LON_MIN, lon_max=EICC_LON_MAX):
+
+    # Use the already-created grid-cell centre if available
+    if "lon_center" in grid.columns:
+        lon = grid["lon_center"]
+
+    else:
+        lon = grid["lon_bin"].apply(
+            lambda x: x.mid if hasattr(x, "mid") else x
+        ).astype(float)
+
+    return grid[
+        (lon >= lon_min) &
+        (lon <= lon_max)
+    ].copy()
+
+
+# These assume you already created:
+# grid_filtered_all
+# grid_filtered_drogued
+
+eicc_all = in_eicc_band(grid_filtered_all)
+eicc_drogued = in_eicc_band(grid_filtered_drogued)
+
+
+print("\nEICC / WESTERN BAY GRID COVERAGE")
+print("--------------------------------")
+
+print("\nAll observations:")
+print(eicc_all.groupby("monsoon").size())
+
+print("\nDrogued observations only:")
+print(eicc_drogued.groupby("monsoon").size())
+
+
+# ============================================================
+# 2. PLOT DROGUED-ONLY MEAN CURRENT FIELD
+# ============================================================
+
+fig, axes = plt.subplots(
+    1,
+    2,
+    figsize=(10, 9),
+    sharex=True,
+    sharey=True,
+    constrained_layout=True
+)
+
+# Use the same speed colour scale for BOTH monsoons
+if len(eicc_drogued) > 0:
+    vmin = eicc_drogued["speed"].min()
+    vmax = eicc_drogued["speed"].max()
+else:
+    vmin = 0
+    vmax = 1
+
+
+q = None
+
+for ax, season in zip(
+    axes,
+    ["Southwest", "Northeast"]
+):
+
+    season_data = eicc_drogued[
+        eicc_drogued["monsoon"] == season
+    ]
+
+    q = ax.quiver(
+        season_data["lon_center"],
+        season_data["lat_center"],
+
+        # normalized vectors:
+        # direction shown by arrow, not arrow length
+        season_data["u_norm"],
+        season_data["v_norm"],
+
+        # colour represents speed
+        season_data["speed"],
+
+        cmap="plasma",
+        clim=(vmin, vmax),
+
+        angles="xy",
+        scale=15,
+        width=0.005
+    )
+
+    ax.set_xlim(EICC_LON_MIN, EICC_LON_MAX)
+    ax.set_ylim(5, 23)
+
+    ax.set_title(
+        f"Approx. EICC Band — {season} Monsoon"
+    )
+
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+
+    ax.grid(alpha=0.2)
+
+
+if q is not None:
+    cbar = fig.colorbar(
+        q,
+        ax=axes,
+        location="right",
+        shrink=0.8,
+        pad=0.03
+    )
+
+    cbar.set_label("Mean Current Speed")
+
+fig.suptitle(
+    "Drifter-Weighted Surface Circulation in the Approximate EICC Band",
+    fontsize=15
+)
+
+plt.show()
+
+
+# ============================================================
+# 3. HELPER:
+# BUILD ONE MEAN VECTOR PER GRID CELL + MONSOON
+# ============================================================
+
+def build_eicc_cell_means(
+    per,
+    min_drifters=MIN_DRIFTERS,
+    lon_range=(EICC_LON_MIN, EICC_LON_MAX)
+):
+
+    p = per.copy()
+
+    # Handle either SW/NE or Southwest/Northeast labels
+    p["monsoon"] = p["monsoon"].replace({
+        "Southwest": "SW",
+        "Northeast": "NE",
+        "Southwest Monsoon": "SW",
+        "Northeast Monsoon": "NE"
+    })
+
+    # If bootstrap weights are not present,
+    # every drifter gets weight 1
+    if "w" not in p.columns:
+        p["w"] = 1
+
+    # Weighted ve/vn
+    p["wve"] = p["ve"] * p["w"]
+    p["wvn"] = p["vn"] * p["w"]
+
+    # One mean current vector per:
+    # monsoon + grid cell
+    g = (
+        p.groupby(
+            ["monsoon", "lat_bin", "lon_bin"],
+            observed=True
+        )
+        .agg(
+            wve=("wve", "sum"),
+            wvn=("wvn", "sum"),
+            total_weight=("w", "sum"),
+
+            # number of DIFFERENT drifter rows
+            # contributing before bootstrap weighting
+            n_drifters=("drifter_id", "nunique")
+        )
+        .reset_index()
+    )
+
+    # Apply minimum drifter coverage
+    g = g[
+        g["n_drifters"] >= min_drifters
+    ].copy()
+
+    # Weighted mean current components
+    g["ve"] = g["wve"] / g["total_weight"]
+    g["vn"] = g["wvn"] / g["total_weight"]
+
+    # Longitude centre
+    g["lon_center"] = g["lon_bin"].apply(
+        lambda x: x.mid if hasattr(x, "mid") else x
+    ).astype(float)
+
+    # Keep only approximate EICC band
+    g = g[
+        (g["lon_center"] >= lon_range[0]) &
+        (g["lon_center"] <= lon_range[1])
+    ].copy()
+
+    return g
+
+
+# ============================================================
+# 4. CALCULATE SW-vs-NE DIRECTION CHANGE
+# ============================================================
+
+def calculate_eicc_reversal(
+    per,
+    min_drifters=MIN_DRIFTERS,
+    lon_range=(EICC_LON_MIN, EICC_LON_MAX)
+):
+
+    g = build_eicc_cell_means(
+        per,
+        min_drifters=min_drifters,
+        lon_range=lon_range
+    )
+
+    # Separate monsoons
+    sw = (
+        g[g["monsoon"] == "SW"]
+        .set_index(["lat_bin", "lon_bin"])
+    )
+
+    ne = (
+        g[g["monsoon"] == "NE"]
+        .set_index(["lat_bin", "lon_bin"])
+    )
+
+    # Keep ONLY cells that exist in BOTH monsoons
+    both = sw[
+        ["ve", "vn", "n_drifters"]
+    ].join(
+        ne[
+            ["ve", "vn", "n_drifters"]
+        ],
+        lsuffix="_sw",
+        rsuffix="_ne",
+        how="inner"
+    )
+
+    if len(both) == 0:
+        return np.nan, pd.DataFrame()
+
+    # --------------------------------------------------------
+    # Calculate angle between SW and NE vectors
+    # --------------------------------------------------------
+
+    dot = (
+        both["ve_sw"] * both["ve_ne"] +
+        both["vn_sw"] * both["vn_ne"]
+    )
+
+    speed_sw = np.sqrt(
+        both["ve_sw"]**2 +
+        both["vn_sw"]**2
+    )
+
+    speed_ne = np.sqrt(
+        both["ve_ne"]**2 +
+        both["vn_ne"]**2
+    )
+
+    denominator = speed_sw * speed_ne
+
+    # Avoid divide-by-zero
+    valid = denominator > 0
+
+    both = both[valid].copy()
+    dot = dot[valid]
+    denominator = denominator[valid]
+
+    # cos(theta)
+    cos_angle = dot / denominator
+
+    # numerical protection
+    cos_angle = np.clip(
+        cos_angle,
+        -1,
+        1
+    )
+
+    # angle difference in degrees
+    both["angle_change"] = np.degrees(
+        np.arccos(cos_angle)
+    )
+
+    # Define "reversed" as > 90 degree directional change
+    both["reversed"] = (
+        both["angle_change"] > 90
+    )
+
+    reversal_fraction = both["reversed"].mean()
+
+    return reversal_fraction, both.reset_index()
+
+
+# ============================================================
+# 5. BOOTSTRAP ACROSS DRIFTERS
+# ============================================================
+
+def bootstrap_ci_eicc(
+    d,
+    n_boot=N_BOOT,
+    seed=0,
+    min_drifters=MIN_DRIFTERS
+):
+
+    # --------------------------------------------------------
+    # First:
+    # one mean ve/vn for each individual drifter
+    # within each cell and monsoon
+    # --------------------------------------------------------
+
+    per = (
+        d.groupby(
+            [
+                "monsoon",
+                "lat_bin",
+                "lon_bin",
+                "drifter_id"
+            ],
+            observed=True
+        )
+        .agg(
+            ve=("ve", "mean"),
+            vn=("vn", "mean")
+        )
+        .reset_index()
+    )
+
+    ids = per["drifter_id"].unique()
+
+    rng = np.random.default_rng(seed)
+
+    bootstrap_results = []
+
+    for _ in range(n_boot):
+
+        # ----------------------------------------------------
+        # Resample WHOLE DRIFTERS
+        #
+        # Important:
+        # ve and vn remain paired because we are sampling
+        # drifter IDs rather than sampling ve/vn separately.
+        # ----------------------------------------------------
+
+        sampled_ids = rng.choice(
+            ids,
+            size=len(ids),
+            replace=True
+        )
+
+        # Count how many times each drifter was selected
+        weights = (
+            pd.Series(sampled_ids)
+            .value_counts()
+            .rename("w")
+        )
+
+        # Attach bootstrap weight to each drifter's
+        # cell-level mean
+        boot_per = per.merge(
+            weights,
+            left_on="drifter_id",
+            right_index=True,
+            how="inner"
+        )
+
+        frac, _ = calculate_eicc_reversal(
+            boot_per,
+            min_drifters=min_drifters
+        )
+
+        bootstrap_results.append(frac)
+
+    bootstrap_results = np.array(
+        bootstrap_results,
+        dtype=float
+    )
+
+    bootstrap_results = bootstrap_results[
+        ~np.isnan(bootstrap_results)
+    ]
+
+    # 95% percentile bootstrap interval
+    lo, median, hi = np.percentile(
+        bootstrap_results,
+        [2.5, 50, 97.5]
+    )
+
+    return lo, median, hi, bootstrap_results
+
+
+# ============================================================
+# 6. ORIGINAL SAMPLE ESTIMATE
+# ============================================================
+
+# Per-drifter means for drogued data
+per_drogued = (
+    cur[cur["drogue"]]
+    .groupby(
+        [
+            "monsoon",
+            "lat_bin",
+            "lon_bin",
+            "drifter_id"
+        ],
+        observed=True
+    )
+    .agg(
+        ve=("ve", "mean"),
+        vn=("vn", "mean")
+    )
+    .reset_index()
+)
+
+drogued_point_estimate, drogued_cells = calculate_eicc_reversal(
+    per_drogued
+)
+
+
+# Per-drifter means for ALL observations
+per_all = (
+    cur.groupby(
+        [
+            "monsoon",
+            "lat_bin",
+            "lon_bin",
+            "drifter_id"
+        ],
+        observed=True
+    )
+    .agg(
+        ve=("ve", "mean"),
+        vn=("vn", "mean")
+    )
+    .reset_index()
+)
+
+all_point_estimate, all_cells = calculate_eicc_reversal(
+    per_all
+)
+
+
+# ============================================================
+# 7. BOOTSTRAP CONFIDENCE INTERVALS
+# ============================================================
+
+lo_d, med_d, hi_d, boot_d = bootstrap_ci_eicc(
+    cur[cur["drogue"]],
+    n_boot=N_BOOT,
+    seed=0
+)
+
+lo_a, med_a, hi_a, boot_a = bootstrap_ci_eicc(
+    cur,
+    n_boot=N_BOOT,
+    seed=0
+)
+
+
+# ============================================================
+# 8. PRINT RESULTS
+# ============================================================
+
+print("\n========================================")
+print("APPROXIMATE EICC BAND RESULTS")
+print("========================================")
+
+print("\nDefinition:")
+print(
+    "Directional reversal = SW and NE mean current "
+    "vectors differ by more than 90 degrees."
+)
+
+print(
+    f"\nMinimum coverage = {MIN_DRIFTERS} unique "
+    "drifters per cell per monsoon."
+)
+
+
+print("\n--- DROGUED ONLY ---")
+
+print(
+    f"Matched SW-NE cells: "
+    f"{len(drogued_cells)}"
+)
+
+print(
+    f"Observed reversal fraction: "
+    f"{drogued_point_estimate * 100:.1f}%"
+)
+
+print(
+    f"Bootstrap median: "
+    f"{med_d * 100:.1f}%"
+)
+
+print(
+    f"95% bootstrap CI: "
+    f"{lo_d * 100:.1f}% "
+    f"to {hi_d * 100:.1f}%"
+)
+
+
+print("\n--- ALL OBSERVATIONS ---")
+
+print(
+    f"Matched SW-NE cells: "
+    f"{len(all_cells)}"
+)
+
+print(
+    f"Observed reversal fraction: "
+    f"{all_point_estimate * 100:.1f}%"
+)
+
+print(
+    f"Bootstrap median: "
+    f"{med_a * 100:.1f}%"
+)
+
+print(
+    f"95% bootstrap CI: "
+    f"{lo_a * 100:.1f}% "
+    f"to {hi_a * 100:.1f}%"
+)
+
+
+# ============================================================
+# 9. OPTIONAL: INSPECT ANGLE CHANGES BY CELL
+# ============================================================
+
+# print("\nExample drogued-only matched cells:")
+
+# print(
+#     drogued_cells[
+#         [
+#             "lat_bin",
+#             "lon_bin",
+#             "ve_sw",
+#             "vn_sw",
+#             "ve_ne",
+#             "vn_ne",
+#             "angle_change",
+#             "reversed"
+#         ]
+#     ]
+#     .sort_values(
+#         "angle_change",
+#         ascending=False
+#     )
+#     .head(15)
+# )
+
+# print(
+#     drogued_cells[
+#         ["lat_bin", "lon_bin", "angle_change", "reversed"]
+#     ].sort_values("angle_change")
+# )
+# print(drogued_cells["reversed"].value_counts())
+# print(
+#     drogued_cells["reversed"].value_counts(normalize=True) * 100
+# )
+
+def reversal_category(angle):
+    if angle < 45:
+        return "Little change"
+    elif angle < 90:
+        return "Moderate change"
+    elif angle < 135:
+        return "Strong directional change"
+    else:
+        return "Near-opposite reversal"
+
+drogued_cells["reversal_category"] = (
+    drogued_cells["angle_change"].apply(reversal_category)
+)
+
+# print(
+#     drogued_cells["reversal_category"]
+#     .value_counts()
+# )
+
+#####################
+
+# ============================================================
+# 1. SPEED DISTRIBUTION: DROGUED VS UNDROGUED BY MONSOON
+# ============================================================
+
+cur = cur.copy()
+
+cur["speed"] = np.sqrt(cur["ve"]**2 + cur["vn"]**2)
+
+cur["drogue_group"] = np.where(
+    cur["drogue"],
+    "Drogued",
+    "Undrogued"
+)
+
+speed_summary = (
+    cur.groupby(["monsoon", "drogue_group"])
+    .agg(
+        n_obs=("speed", "size"),
+        mean_speed=("speed", "mean"),
+        median_speed=("speed", "median"),
+        std_speed=("speed", "std"),
+        p25=("speed", lambda x: x.quantile(0.25)),
+        p75=("speed", lambda x: x.quantile(0.75))
+    )
+)
+
+print("\nSPEED SUMMARY")
+print(speed_summary)
+
+
+# Boxplot
+plot_order = ["SW", "NE"]
+
+fig, axes = plt.subplots(
+    1, 2,
+    figsize=(12, 5),
+    sharey=True,
+    constrained_layout=True
+)
+
+for ax, season in zip(axes, plot_order):
+
+    drogued = cur[
+        (cur["monsoon"] == season) &
+        (cur["drogue"])
+    ]["speed"].dropna()
+
+    undrogued = cur[
+        (cur["monsoon"] == season) &
+        (~cur["drogue"])
+    ]["speed"].dropna()
+
+    ax.boxplot(
+        [drogued, undrogued],
+        labels=["Drogued", "Undrogued"],
+        showfliers=False
+    )
+
+    ax.set_title(
+        "Southwest Monsoon" if season == "SW"
+        else "Northeast Monsoon"
+    )
+
+    ax.set_ylabel("Current Speed")
+
+plt.suptitle(
+    "Current Speed by Drogue Status and Monsoon"
+)
+
+plt.show()
+
+# ============================================================
+# 2. FUNCTION TO BUILD DRIFTER-WEIGHTED GRID
+# ============================================================
+
+def build_drifter_weighted_grid(data, min_drifters=3):
+
+    # One mean per drifter, per cell, per monsoon
+    drifter_cell = (
+        data.groupby(
+            ["monsoon", "lat_bin", "lon_bin", "drifter_id"],
+            observed=True
+        )
+        .agg(
+            drifter_ve=("ve", "mean"),
+            drifter_vn=("vn", "mean"),
+            n_obs=("ve", "count")
+        )
+        .reset_index()
+    )
+
+    # Then average across drifters
+    grid = (
+        drifter_cell.groupby(
+            ["monsoon", "lat_bin", "lon_bin"],
+            observed=True
+        )
+        .agg(
+            mean_ve=("drifter_ve", "mean"),
+            mean_vn=("drifter_vn", "mean"),
+            n_drifters=("drifter_id", "nunique"),
+            n_obs=("n_obs", "sum")
+        )
+        .reset_index()
+    )
+
+    grid["lat_center"] = grid["lat_bin"].apply(
+        lambda x: x.mid if hasattr(x, "mid") else x
+    ).astype(float)
+
+    grid["lon_center"] = grid["lon_bin"].apply(
+        lambda x: x.mid if hasattr(x, "mid") else x
+    ).astype(float)
+
+    grid = grid[
+        grid["n_drifters"] >= min_drifters
+    ].copy()
+
+    grid["speed"] = np.sqrt(
+        grid["mean_ve"]**2 +
+        grid["mean_vn"]**2
+    )
+
+    grid = grid[grid["speed"] > 0].copy()
+
+    grid["u_norm"] = (
+        grid["mean_ve"] / grid["speed"]
+    )
+
+    grid["v_norm"] = (
+        grid["mean_vn"] / grid["speed"]
+    )
+
+    return grid
+
+
+grid_all = build_drifter_weighted_grid(
+    cur,
+    min_drifters=3
+)
+
+grid_drogued = build_drifter_weighted_grid(
+    cur[cur["drogue"]],
+    min_drifters=3
+)
+
+# ============================================================
+# 3. ALL DATA VS DROGUED ONLY MAPS
+# ============================================================
+
+fig, axes = plt.subplots(
+    2, 2,
+    figsize=(14, 12),
+    sharex=True,
+    sharey=True,
+    constrained_layout=True
+)
+
+datasets = [
+    ("All Data — SW", grid_all, "SW"),
+    ("All Data — NE", grid_all, "NE"),
+    ("Drogued Only — SW", grid_drogued, "SW"),
+    ("Drogued Only — NE", grid_drogued, "NE")
+]
+
+combined_speed = pd.concat([
+    grid_all["speed"],
+    grid_drogued["speed"]
+])
+
+vmin = combined_speed.min()
+vmax = combined_speed.max()
+
+q = None
+
+for ax, (title, grid_data, season) in zip(
+    axes.flatten(),
+    datasets
+):
+
+    d = grid_data[
+        grid_data["monsoon"] == season
+    ]
+
+    q = ax.quiver(
+        d["lon_center"],
+        d["lat_center"],
+        d["u_norm"],
+        d["v_norm"],
+        d["speed"],
+        cmap="plasma",
+        clim=(vmin, vmax),
+        angles="xy",
+        scale=25,
+        width=0.003
+    )
+
+    ax.set_xlim(78, 99)
+    ax.set_ylim(5, 23)
+    ax.set_title(title)
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.grid(alpha=0.2)
+
+cbar = fig.colorbar(
+    q,
+    ax=axes.ravel().tolist(),
+    shrink=0.8,
+    pad=0.02
+)
+
+cbar.set_label("Mean Current Speed")
+
+fig.suptitle(
+    "Sensitivity of Mean Circulation to Drogue Status",
+    fontsize=16
+)
+
+plt.show()
+
+# ============================================================
+# 4. CELL-BY-CELL DROGUE SENSITIVITY
+# ============================================================
+
+def compare_all_vs_drogued(grid_all, grid_drogued, season):
+
+    a = (
+        grid_all[
+            grid_all["monsoon"] == season
+        ]
+        .set_index(["lat_bin", "lon_bin"])
+    )
+
+    d = (
+        grid_drogued[
+            grid_drogued["monsoon"] == season
+        ]
+        .set_index(["lat_bin", "lon_bin"])
+    )
+
+    comp = a[
+        ["mean_ve", "mean_vn", "speed"]
+    ].join(
+        d[
+            ["mean_ve", "mean_vn", "speed"]
+        ],
+        lsuffix="_all",
+        rsuffix="_drogued",
+        how="inner"
+    )
+
+    # speed difference
+    comp["speed_diff"] = (
+        comp["speed_all"] -
+        comp["speed_drogued"]
+    )
+
+    # angle between all-data and drogued-only vectors
+    dot = (
+        comp["mean_ve_all"] *
+        comp["mean_ve_drogued"] +
+        comp["mean_vn_all"] *
+        comp["mean_vn_drogued"]
+    )
+
+    mag_all = np.sqrt(
+        comp["mean_ve_all"]**2 +
+        comp["mean_vn_all"]**2
+    )
+
+    mag_d = np.sqrt(
+        comp["mean_ve_drogued"]**2 +
+        comp["mean_vn_drogued"]**2
+    )
+
+    denom = mag_all * mag_d
+
+    valid = denom > 0
+
+    comp = comp[valid].copy()
+
+    cos_angle = (
+        dot[valid] /
+        denom[valid]
+    )
+
+    cos_angle = np.clip(
+        cos_angle,
+        -1,
+        1
+    )
+
+    comp["direction_change_deg"] = np.degrees(
+        np.arccos(cos_angle)
+    )
+
+    return comp.reset_index()
+
+
+compare_sw = compare_all_vs_drogued(
+    grid_all,
+    grid_drogued,
+    "SW"
+)
+
+compare_ne = compare_all_vs_drogued(
+    grid_all,
+    grid_drogued,
+    "NE"
+)
+
+print("\nSW DROGUE SENSITIVITY")
+print(
+    compare_sw[
+        ["speed_diff", "direction_change_deg"]
+    ].describe()
+)
+
+print("\nNE DROGUE SENSITIVITY")
+print(
+    compare_ne[
+        ["speed_diff", "direction_change_deg"]
+    ].describe()
+)
+
+for name, comp in [
+    ("Southwest", compare_sw),
+    ("Northeast", compare_ne)
+]:
+    print(f"\n{name}")
+
+    for angle in [15, 30, 45, 90]:
+        pct = (
+            comp["direction_change_deg"] > angle
+        ).mean() * 100
+
+        print(
+            f">{angle}° direction change: {pct:.1f}%"
+        )
+
+# Add drifter counts from the all-data and drogued-only grids
+
+def add_drifter_counts(comp, grid_all, grid_drogued, season):
+
+    a = (
+        grid_all[grid_all["monsoon"] == season]
+        .set_index(["lat_bin", "lon_bin"])
+    )
+
+    d = (
+        grid_drogued[grid_drogued["monsoon"] == season]
+        .set_index(["lat_bin", "lon_bin"])
+    )
+
+    counts = a[["n_drifters"]].join(
+        d[["n_drifters"]],
+        lsuffix="_all",
+        rsuffix="_drogued",
+        how="inner"
+    )
+
+    comp = comp.set_index(["lat_bin", "lon_bin"])
+
+    comp = comp.join(counts)
+
+    return comp.reset_index()
+
+
+compare_sw = add_drifter_counts(
+    compare_sw,
+    grid_all,
+    grid_drogued,
+    "SW"
+)
+
+compare_ne = add_drifter_counts(
+    compare_ne,
+    grid_all,
+    grid_drogued,
+    "NE"
+)
+
+def sample_group(n):
+    if n < 5:
+        return "3-4 drifters"
+    elif n < 10:
+        return "5-9 drifters"
+    else:
+        return "10+ drifters"
+
+
+compare_sw["sample_group"] = (
+    compare_sw["n_drifters_drogued"].apply(sample_group)
+)
+
+compare_ne["sample_group"] = (
+    compare_ne["n_drifters_drogued"].apply(sample_group)
+)
+
+print("\nSW direction change by sample size")
+print(
+    compare_sw.groupby("sample_group")["direction_change_deg"]
+    .agg(["count", "mean", "median", "max"])
+)
+
+print("\nNE direction change by sample size")
+print(
+    compare_ne.groupby("sample_group")["direction_change_deg"]
+    .agg(["count", "mean", "median", "max"])
+)
+
+# ============================================================
+# DROGUE SENSITIVITY VS SAMPLE SIZE
+# ============================================================
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+# ------------------------------------------------------------
+# 1. Merge all-data and drogued-only grids
+# ------------------------------------------------------------
+
+m = allg.merge(
+    dr,
+    on=["monsoon", "lat_bin", "lon_bin"],
+    suffixes=("_all", "_dr")
+)
+
+print("\n========================================")
+print("DROGUE SENSITIVITY ANALYSIS")
+print("========================================")
+
+print(f"\nShared cells: {len(m)}")
+
+print("\nShared cells by monsoon:")
+print(m.groupby("monsoon").size())
+
+
+# ------------------------------------------------------------
+# 2. Calculate current speed
+# ------------------------------------------------------------
+
+m["speed_all"] = np.sqrt(
+    m["ve_all"]**2 +
+    m["vn_all"]**2
+)
+
+m["speed_dr"] = np.sqrt(
+    m["ve_dr"]**2 +
+    m["vn_dr"]**2
+)
+
+
+# ------------------------------------------------------------
+# 3. Absolute speed difference
+# ------------------------------------------------------------
+# This is often easier to interpret than % difference.
+
+m["speed_diff_abs"] = (
+    m["speed_all"] -
+    m["speed_dr"]
+)
+
+m["speed_diff_abs_mag"] = np.abs(
+    m["speed_diff_abs"]
+)
+
+
+# ------------------------------------------------------------
+# 4. Percentage speed difference
+# ------------------------------------------------------------
+# IMPORTANT:
+# If speed_all is extremely close to zero, percentages can become
+# enormous and misleading.
+#
+# Only calculate percentage difference where all-data speed
+# is reasonably above zero.
+
+MIN_SPEED_FOR_PERCENT = 0.05
+
+m["pct_diff"] = np.nan
+
+valid_speed = (
+    m["speed_all"] >= MIN_SPEED_FOR_PERCENT
+)
+
+m.loc[valid_speed, "pct_diff"] = (
+    np.abs(
+        m.loc[valid_speed, "speed_all"] -
+        m.loc[valid_speed, "speed_dr"]
+    )
+    /
+    m.loc[valid_speed, "speed_all"]
+    * 100
+)
+
+
+# ------------------------------------------------------------
+# 5. Direction of each current vector
+# ------------------------------------------------------------
+
+m["angle_all"] = np.degrees(
+    np.arctan2(
+        m["vn_all"],
+        m["ve_all"]
+    )
+)
+
+m["angle_dr"] = np.degrees(
+    np.arctan2(
+        m["vn_dr"],
+        m["ve_dr"]
+    )
+)
+
+
+# Smallest angle between the two directions:
+# always between 0 and 180 degrees
+
+m["angle_diff"] = np.abs(
+    (
+        m["angle_dr"] -
+        m["angle_all"] +
+        180
+    ) % 360 - 180
+)
+
+
+# ------------------------------------------------------------
+# 6. Sample-size groups
+# ------------------------------------------------------------
+
+def sample_group(n):
+
+    if n < 5:
+        return "3-4 drifters"
+
+    elif n < 10:
+        return "5-9 drifters"
+
+    else:
+        return "10+ drifters"
+
+
+m["sample_group"] = (
+    m["n_dr"]
+    .apply(sample_group)
+)
+
+# Put groups in logical order
+sample_order = [
+    "3-4 drifters",
+    "5-9 drifters",
+    "10+ drifters"
+]
+
+m["sample_group"] = pd.Categorical(
+    m["sample_group"],
+    categories=sample_order,
+    ordered=True
+)
+
+
+# ------------------------------------------------------------
+# 7. Overall summary by monsoon
+# ------------------------------------------------------------
+
+print("\n\nSPEED + DIRECTION DIFFERENCE SUMMARY")
+
+summary = (
+    m.groupby("monsoon")[
+        [
+            "speed_diff_abs",
+            "speed_diff_abs_mag",
+            "pct_diff",
+            "angle_diff"
+        ]
+    ]
+    .describe()
+)
+
+print(summary)
+
+
+# ------------------------------------------------------------
+# 8. Correlation with drogued sample size
+# ------------------------------------------------------------
+
+print("\n\nRELATIONSHIP WITH NUMBER OF DROGUED DRIFTERS")
+
+for season in ["SW", "NE"]:
+
+    d = m[
+        m["monsoon"] == season
+    ]
+
+    print(f"\n{season}")
+
+    print(
+        "Correlation: n_drifters vs |speed difference| =",
+        d["n_dr"].corr(
+            d["speed_diff_abs_mag"]
+        )
+    )
+
+    print(
+        "Correlation: n_drifters vs direction difference =",
+        d["n_dr"].corr(
+            d["angle_diff"]
+        )
+    )
+
+    # Percentage speed only where valid
+    valid = d.dropna(
+        subset=["pct_diff"]
+    )
+
+    print(
+        "Correlation: n_drifters vs % speed difference =",
+        valid["n_dr"].corr(
+            valid["pct_diff"]
+        )
+    )
+
+
+# ------------------------------------------------------------
+# 9. Direction sensitivity thresholds
+# ------------------------------------------------------------
+
+print("\n\nDIRECTION CHANGE THRESHOLDS")
+
+for season in ["SW", "NE"]:
+
+    d = m[
+        m["monsoon"] == season
+    ]
+
+    print(f"\n{season}")
+
+    for angle in [
+        15,
+        30,
+        45,
+        90
+    ]:
+
+        pct = (
+            d["angle_diff"] > angle
+        ).mean() * 100
+
+        print(
+            f">{angle}° direction change: "
+            f"{pct:.1f}%"
+        )
+
+
+# ------------------------------------------------------------
+# 10. Compare direction change by SAMPLE-SIZE GROUP
+# ------------------------------------------------------------
+
+print("\n\nDIRECTION CHANGE BY SAMPLE SIZE")
+
+direction_by_sample = (
+    m.groupby(
+        ["monsoon", "sample_group"],
+        observed=True
+    )
+    ["angle_diff"]
+    .agg(
+        count="count",
+        mean="mean",
+        median="median",
+        max="max"
+    )
+)
+
+print(direction_by_sample)
+
+
+# ------------------------------------------------------------
+# 11. Compare speed change by SAMPLE-SIZE GROUP
+# ------------------------------------------------------------
+
+print("\n\nABSOLUTE SPEED CHANGE BY SAMPLE SIZE")
+
+speed_by_sample = (
+    m.groupby(
+        ["monsoon", "sample_group"],
+        observed=True
+    )
+    ["speed_diff_abs_mag"]
+    .agg(
+        count="count",
+        mean="mean",
+        median="median",
+        max="max"
+    )
+)
+
+print(speed_by_sample)
+
+
+# ------------------------------------------------------------
+# 12. Plot SW and NE separately
+# ------------------------------------------------------------
+
+fig, axes = plt.subplots(
+    2,
+    2,
+    figsize=(13, 10),
+    sharex="col",
+    constrained_layout=True
+)
+
+
+# ----------------------------
+# Southwest
+# ----------------------------
+
+sw = m[
+    m["monsoon"] == "SW"
+]
+
+axes[0, 0].scatter(
+    sw["n_dr"],
+    sw["speed_diff_abs_mag"],
+    alpha=0.5
+)
+
+axes[0, 0].set_title(
+    "Southwest: Speed Sensitivity"
+)
+
+axes[0, 0].set_ylabel(
+    "Absolute Speed Difference"
+)
+
+axes[0, 0].set_xlabel(
+    "Number of Drogued Drifters"
+)
+
+
+axes[0, 1].scatter(
+    sw["n_dr"],
+    sw["angle_diff"],
+    alpha=0.5
+)
+
+axes[0, 1].set_title(
+    "Southwest: Direction Sensitivity"
+)
+
+axes[0, 1].set_ylabel(
+    "Direction Difference (degrees)"
+)
+
+axes[0, 1].set_xlabel(
+    "Number of Drogued Drifters"
+)
+
+
+# ----------------------------
+# Northeast
+# ----------------------------
+
+ne = m[
+    m["monsoon"] == "NE"
+]
+
+axes[1, 0].scatter(
+    ne["n_dr"],
+    ne["speed_diff_abs_mag"],
+    alpha=0.5
+)
+
+axes[1, 0].set_title(
+    "Northeast: Speed Sensitivity"
+)
+
+axes[1, 0].set_ylabel(
+    "Absolute Speed Difference"
+)
+
+axes[1, 0].set_xlabel(
+    "Number of Drogued Drifters"
+)
+
+
+axes[1, 1].scatter(
+    ne["n_dr"],
+    ne["angle_diff"],
+    alpha=0.5
+)
+
+axes[1, 1].set_title(
+    "Northeast: Direction Sensitivity"
+)
+
+axes[1, 1].set_ylabel(
+    "Direction Difference (degrees)"
+)
+
+axes[1, 1].set_xlabel(
+    "Number of Drogued Drifters"
+)
+
+
+fig.suptitle(
+    "Sensitivity to Drogue Filtering vs Drifter Sample Size",
+    fontsize=15
+)
+
+plt.show()
