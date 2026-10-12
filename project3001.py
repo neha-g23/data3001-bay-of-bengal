@@ -3,6 +3,7 @@ import clouddrift as cd
 from clouddrift.ragged import subset
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
+from matplotlib.colors import Normalize
 import pandas as pd
 import numpy as np
 
@@ -77,7 +78,7 @@ plt.xlabel("Longitude")
 plt.ylabel("Latitude")
 plt.title("Drifter Observation Density: Bay of Bengal")
 
-# plt.show()
+plt.show()
 
 
 # ============================================================
@@ -638,7 +639,7 @@ plt.xlabel("Longitude")
 plt.ylabel("Latitude")
 plt.title("Unique Drifter Coverage: Bay of Bengal")
 
-# plt.show()
+plt.show()
 
 
 # ============================================================
@@ -728,6 +729,8 @@ currents_drogued = currents[currents["drogue_status"]].copy()
 #      subsets so the two comparisons follow an identical procedure.
 # --------------------------------------------------
 
+MIN_OBS_PER_DRIFTER = 12
+
 def build_drifter_weighted_grid(currents_subset):
     drifter_cell = (
         currents_subset
@@ -743,6 +746,8 @@ def build_drifter_weighted_grid(currents_subset):
         .reset_index()
     )
 
+    drifter_cell = drifter_cell[drifter_cell["drifter_obs"] >= MIN_OBS_PER_DRIFTER]
+
     cell_grid = (
         drifter_cell
         .groupby(
@@ -757,6 +762,12 @@ def build_drifter_weighted_grid(currents_subset):
         )
         .reset_index()
     )
+
+    all_cells = currents_subset[["monsoon", "lat_bin", "lon_bin"]].drop_duplicates()
+    cell_grid = all_cells.merge(
+        cell_grid, on=["monsoon", "lat_bin", "lon_bin"], how="left"
+    )
+    cell_grid[["n_drifters", "n_obs"]] = cell_grid[["n_drifters", "n_obs"]].fillna(0).astype(int)
 
     cell_grid["lat_center"] = cell_grid["lat_bin"].apply(lambda x: x.mid).astype(float)
     cell_grid["lon_center"] = cell_grid["lon_bin"].apply(lambda x: x.mid).astype(float)
@@ -835,7 +846,7 @@ grid_filtered_drogued = add_speed_and_direction(grid_filtered_drogued)
 # 13.7 Plot: rows = all data / drogued-only, columns = SW / NE
 # --------------------------------------------------
 
-def plot_season_quiver(ax, season_data, season_insufficient, vmin, vmax, title):
+def plot_season_quiver(ax, season_data, season_insufficient, norm, cmap, title):
     # Shade sampled-but-below-threshold cells grey/hatched rather than
     # leaving them blank, so "insufficient data" reads as a deliberate
     # result rather than a gap in the plot.
@@ -851,14 +862,24 @@ def plot_season_quiver(ax, season_data, season_insufficient, vmin, vmax, title):
             zorder=0
         ))
 
-    q = ax.quiver(
+    # Colour each cell's background by speed, so direction (the arrow)
+    # and magnitude (the cell colour) read as two separate channels.
+    for _, cell in season_data.iterrows():
+        ax.add_patch(Rectangle(
+            (cell["lon_center"] - grid_size / 2, cell["lat_center"] - grid_size / 2),
+            grid_size,
+            grid_size,
+            facecolor=cmap(norm(cell["speed"])),
+            edgecolor="none",
+            zorder=0
+        ))
+
+    ax.quiver(
         season_data["lon_center"],
         season_data["lat_center"],
         season_data["u_norm"],
         season_data["v_norm"],
-        season_data["speed"],
-        cmap="plasma",
-        clim=(vmin, vmax),
+        color="black",
         angles="xy",
         scale=25,
         width=0.003
@@ -871,36 +892,25 @@ def plot_season_quiver(ax, season_data, season_insufficient, vmin, vmax, title):
     ax.set_title(title)
     ax.grid(alpha=0.2)
 
-    return q
-
 fig, axes = plt.subplots(
-    2, 2,
-    figsize=(15, 13),
+    1, 2,
+    figsize=(15, 7),
     sharex=True,
     sharey=True,
     constrained_layout=True
 )
 
-# Same speed scale across all four panels
-vmin = min(grid_filtered_all["speed"].min(), grid_filtered_drogued["speed"].min())
-vmax = max(grid_filtered_all["speed"].max(), grid_filtered_drogued["speed"].max())
+norm = Normalize(vmin=grid_filtered_drogued["speed"].min(), vmax=grid_filtered_drogued["speed"].max())
+cmap = plt.get_cmap("YlGnBu")
 
-row_specs = [
-    ("All Data", grid_filtered_all, insufficient_all, axes[0]),
-    ("Drogued Only", grid_filtered_drogued, insufficient_drogued, axes[1]),
-]
+for ax, season in zip(axes, ["Southwest", "Northeast"]):
+    season_data = grid_filtered_drogued[grid_filtered_drogued["monsoon"] == season]
+    season_insufficient = insufficient_drogued[insufficient_drogued["monsoon"] == season]
 
-q = None
-
-for row_label, filtered_grid, below_threshold, row_axes in row_specs:
-    for ax, season in zip(row_axes, ["Southwest", "Northeast"]):
-        season_data = filtered_grid[filtered_grid["monsoon"] == season]
-        season_insufficient = below_threshold[below_threshold["monsoon"] == season]
-
-        q = plot_season_quiver(
-            ax, season_data, season_insufficient, vmin, vmax,
-            f"{row_label} — {season} Monsoon"
-        )
+    plot_season_quiver(
+        ax, season_data, season_insufficient, norm, cmap,
+        f"Drogued Only — {season} Monsoon"
+    )
 
 insufficient_patch = Rectangle(
     (0, 0), 1, 1,
@@ -908,12 +918,12 @@ insufficient_patch = Rectangle(
     edgecolor="none",
     hatch="//",
     alpha=0.5,
-    label=f"Insufficient data (<{min_drifters} drifters)"
+    label=f"Insufficient data (<{min_drifters} drifters with ≥{MIN_OBS_PER_DRIFTER} obs)"
 )
-axes[0][0].legend(handles=[insufficient_patch], loc="upper left", fontsize=8)
+axes[0].legend(handles=[insufficient_patch], loc="upper left", fontsize=8)
 
 cbar = fig.colorbar(
-    q,
+    plt.cm.ScalarMappable(norm=norm, cmap=cmap),
     ax=axes,
     location="right",
     shrink=0.8,
@@ -923,7 +933,7 @@ cbar = fig.colorbar(
 cbar.set_label("Mean Current Speed")
 
 fig.suptitle(
-    "Drifter-Weighted Mean Surface Circulation: All Data vs Drogued-Only",
+    "Drifter-Weighted Mean Surface Circulation: Drogued Only",
     fontsize=16
 )
 
@@ -2647,3 +2657,443 @@ fig.suptitle(
 )
 
 plt.show()
+
+x = drifter_cell_drogued["drifter_obs"]
+print(x.describe(percentiles=[.1, .25, .5, .75, .9]))
+for m in [6, 12, 24, 48, 72]:
+    print(f"under {m} obs: {(x < m).mean()*100:.1f}% of visits, "
+          f"{x[x < m].sum()/x.sum()*100:.1f}% of observations")
+
+def reversal_share(g):
+    sw = g[g.monsoon == "Southwest"].set_index(["lat_bin", "lon_bin"])[["mean_ve", "mean_vn"]]
+    ne = g[g.monsoon == "Northeast"].set_index(["lat_bin", "lon_bin"])[["mean_ve", "mean_vn"]]
+    b = sw.join(ne, lsuffix="_sw", rsuffix="_ne", how="inner")
+    dot = b.mean_ve_sw * b.mean_ve_ne + b.mean_vn_sw * b.mean_vn_ne
+    return len(b), (dot < 0).mean()
+
+rows = []
+for m in [1, 6, 12, 24, 48, 72]:
+    dc = drifter_cell_drogued[drifter_cell_drogued["drifter_obs"] >= m]
+    g = (dc.groupby(["monsoon", "lat_bin", "lon_bin"], observed=True)
+           .agg(mean_ve=("drifter_ve", "mean"), mean_vn=("drifter_vn", "mean"),
+                n_drifters=("drifter_id", "nunique")).reset_index())
+    g = g[g.n_drifters >= 3]
+    c = g.groupby("monsoon").size()
+    n_both, frac = reversal_share(g)
+    rows.append(dict(min_obs=m, SW_cells=c.get("Southwest", 0), NE_cells=c.get("Northeast", 0),
+                     cells_both=n_both, reversed_pct=round(frac * 100, 1)))
+print(pd.DataFrame(rows).set_index("min_obs"))
+
+rng = np.random.default_rng(0)
+ses = {}
+for m in [1, 12, 24, 48]:
+    dc = drifter_cell_drogued[drifter_cell_drogued["drifter_obs"] >= m]
+    u = bootstrap_cell_uncertainty(dc)
+    ses[m] = u.set_index(["monsoon", "lat_bin", "lon_bin"])["se_ve"]
+print(pd.concat(ses, axis=1, join="inner").median())
+
+
+# ============================================================
+# POSTER FIGURES — preliminary results
+# ============================================================
+# Self-contained: rebuilds everything directly from ds_bob instead of
+# reusing variables from earlier sections (build_drifter_weighted_grid,
+# grid_drogued, cur, drifter_cell_drogued, etc. are all redefined more
+# than once above, so relying on their final state here would silently
+# depend on whichever definition happened to run last).
+#
+# Rule, used throughout: drogued observations only, 1x1 degree cells, a
+# cell counts only if at least POSTER_MIN_DRIFTERS distinct drifters each
+# contributed at least POSTER_MIN_OBS_PER_DRIFTER hourly observations in
+# that cell, and the cell value is a drifter-weighted mean (average
+# within each drifter first, then average across qualifying drifters).
+
+POSTER_DIR = "poster_figures"
+os.makedirs(POSTER_DIR, exist_ok=True)
+
+POSTER_MIN_OBS_PER_DRIFTER = 12
+POSTER_MIN_DRIFTERS = 3
+POSTER_GRID_SIZE = 1.0
+POSTER_ERR_SST_MAX = 0.5  # degrees C -- see err_sst distribution printed below
+POSTER_EICC_LON_RANGE = (80.0, 85.0)
+POSTER_N_BOOT = 500
+POSTER_SEED = 0
+
+plt.rcParams.update({"font.size": 16})
+
+# --------------------------------------------------
+# A. Build the base observation table (SW/NE only, all drogue statuses,
+#    so the drogued-share numbers can be computed before filtering)
+# --------------------------------------------------
+
+poster_drifter_ids = np.repeat(ds_bob["id"].values, ds_bob["rowsize"].values.astype(int))
+
+poster_all = pd.DataFrame({
+    "time": ds_bob["time"].values,
+    "lat": ds_bob["lat"].values,
+    "lon": ds_bob["lon"].values,
+    "ve": ds_bob["ve"].values,
+    "vn": ds_bob["vn"].values,
+    "sst": ds_bob["sst"].values - 273.15,  # sst is stored in Kelvin (ds_bob["sst"].attrs["units"])
+    "err_sst": ds_bob["err_sst"].values,
+    "drogue_status": ds_bob["drogue_status"].values,
+    "drifter_id": poster_drifter_ids,
+})
+
+poster_month = pd.to_datetime(poster_all["time"]).dt.month
+poster_all["monsoon"] = np.where(
+    poster_month.isin([6, 7, 8, 9]), "Southwest",
+    np.where(poster_month.isin([12, 1, 2]), "Northeast", "Inter-monsoon")
+)
+poster_all = poster_all[poster_all["monsoon"].isin(["Southwest", "Northeast"])].copy()
+
+poster_lat_bins = np.arange(5, 23 + POSTER_GRID_SIZE, POSTER_GRID_SIZE)
+poster_lon_bins = np.arange(78, 99 + POSTER_GRID_SIZE, POSTER_GRID_SIZE)
+poster_all["lat_bin"] = pd.cut(poster_all["lat"], bins=poster_lat_bins, include_lowest=True)
+poster_all["lon_bin"] = pd.cut(poster_all["lon"], bins=poster_lon_bins, include_lowest=True)
+poster_all["lat_center"] = poster_all["lat_bin"].apply(lambda x: x.mid).astype(float)
+poster_all["lon_center"] = poster_all["lon_bin"].apply(lambda x: x.mid).astype(float)
+
+poster_drogued_share = (
+    poster_all.groupby("monsoon")["drogue_status"].mean() * 100
+)
+
+poster_obs = poster_all[poster_all["drogue_status"]].copy()  # drogued only, from here on
+
+# --------------------------------------------------
+# B. Drifter-weighted velocity grid (for the circulation figure, the
+#    reversal statistics and the bootstrap)
+# --------------------------------------------------
+
+poster_vel_per_drifter = (
+    poster_obs
+    .groupby(["monsoon", "lat_bin", "lon_bin", "lat_center", "lon_center", "drifter_id"], observed=True)
+    .agg(mean_ve=("ve", "mean"), mean_vn=("vn", "mean"), n_obs=("ve", "count"))
+    .reset_index()
+)
+poster_vel_per_drifter = poster_vel_per_drifter[
+    poster_vel_per_drifter["n_obs"] >= POSTER_MIN_OBS_PER_DRIFTER
+].copy()
+
+
+def poster_build_velocity_grid(per_drifter, lon_range=None):
+    df = per_drifter
+    if lon_range is not None:
+        lo, hi = lon_range
+        df = df[(df["lon_center"] >= lo) & (df["lon_center"] < hi)]
+
+    cell_grid = (
+        df.groupby(["monsoon", "lat_bin", "lon_bin", "lat_center", "lon_center"], observed=True)
+        .agg(mean_ve=("mean_ve", "mean"), mean_vn=("mean_vn", "mean"), n_drifters=("drifter_id", "nunique"))
+        .reset_index()
+    )
+
+    all_cells = df[["monsoon", "lat_bin", "lon_bin", "lat_center", "lon_center"]].drop_duplicates()
+    cell_grid = all_cells.merge(
+        cell_grid, on=["monsoon", "lat_bin", "lon_bin", "lat_center", "lon_center"], how="left"
+    )
+    cell_grid["n_drifters"] = cell_grid["n_drifters"].fillna(0).astype(int)
+
+    sufficient = cell_grid[cell_grid["n_drifters"] >= POSTER_MIN_DRIFTERS].copy()
+    sufficient["speed"] = np.sqrt(sufficient["mean_ve"]**2 + sufficient["mean_vn"]**2)
+    sufficient = sufficient[sufficient["speed"] > 0].copy()
+    sufficient["u_norm"] = sufficient["mean_ve"] / sufficient["speed"]
+    sufficient["v_norm"] = sufficient["mean_vn"] / sufficient["speed"]
+
+    insufficient = cell_grid[cell_grid["n_drifters"] < POSTER_MIN_DRIFTERS].copy()
+    return sufficient, insufficient
+
+
+poster_vel_sufficient, poster_vel_insufficient = poster_build_velocity_grid(poster_vel_per_drifter)
+
+poster_cells_kept = poster_vel_sufficient.groupby("monsoon").size()
+
+# --------------------------------------------------
+# C. Reversal share (>90 degree direction change) + bootstrap CI,
+#    whole bay and the approximate EICC band
+# --------------------------------------------------
+
+
+def poster_reversal_point_estimate(per_drifter, lon_range=None):
+    df = per_drifter
+    if lon_range is not None:
+        lo, hi = lon_range
+        df = df[(df["lon_center"] >= lo) & (df["lon_center"] < hi)]
+
+    g = (
+        df.groupby(["monsoon", "lat_bin", "lon_bin"], observed=True)
+        .agg(mean_ve=("mean_ve", "mean"), mean_vn=("mean_vn", "mean"), n_drifters=("drifter_id", "nunique"))
+        .reset_index()
+    )
+    g = g[g["n_drifters"] >= POSTER_MIN_DRIFTERS]
+
+    sw = g[g["monsoon"] == "Southwest"].set_index(["lat_bin", "lon_bin"])[["mean_ve", "mean_vn"]]
+    ne = g[g["monsoon"] == "Northeast"].set_index(["lat_bin", "lon_bin"])[["mean_ve", "mean_vn"]]
+    both = sw.join(ne, lsuffix="_sw", rsuffix="_ne", how="inner")
+    if len(both) == 0:
+        return 0, np.nan
+
+    dot = both["mean_ve_sw"] * both["mean_ve_ne"] + both["mean_vn_sw"] * both["mean_vn_ne"]
+    return len(both), (dot < 0).mean() * 100
+
+
+def poster_bootstrap_reversal(per_drifter, lon_range=None, n_boot=POSTER_N_BOOT, seed=POSTER_SEED):
+    df = per_drifter
+    if lon_range is not None:
+        lo, hi = lon_range
+        df = df[(df["lon_center"] >= lo) & (df["lon_center"] < hi)]
+
+    unique_drifters = df["drifter_id"].unique()
+    n_drifters = len(unique_drifters)
+    rng = np.random.default_rng(seed)
+
+    results = []
+    for _ in range(n_boot):
+        draws = rng.choice(unique_drifters, size=n_drifters, replace=True)
+        draw_counts = pd.Series(draws).value_counts()
+
+        # Resampled "instances": duplicated draws of the same physical
+        # drifter are weighted copies, not collapsed, so a drifter drawn
+        # twice counts twice toward both the cell mean and n_drifters --
+        # standard whole-unit bootstrap behaviour.
+        tmp = df.merge(draw_counts.rename("w"), left_on="drifter_id", right_index=True, how="inner")
+        tmp["w_ve"] = tmp["mean_ve"] * tmp["w"]
+        tmp["w_vn"] = tmp["mean_vn"] * tmp["w"]
+
+        g = (
+            tmp.groupby(["monsoon", "lat_bin", "lon_bin"], observed=True)
+            .agg(sum_ve=("w_ve", "sum"), sum_vn=("w_vn", "sum"), sum_w=("w", "sum"))
+            .reset_index()
+        )
+        g["mean_ve"] = g["sum_ve"] / g["sum_w"]
+        g["mean_vn"] = g["sum_vn"] / g["sum_w"]
+        g = g[g["sum_w"] >= POSTER_MIN_DRIFTERS]
+
+        sw = g[g["monsoon"] == "Southwest"].set_index(["lat_bin", "lon_bin"])[["mean_ve", "mean_vn"]]
+        ne = g[g["monsoon"] == "Northeast"].set_index(["lat_bin", "lon_bin"])[["mean_ve", "mean_vn"]]
+        both = sw.join(ne, lsuffix="_sw", rsuffix="_ne", how="inner")
+        if len(both) == 0:
+            continue
+
+        dot = both["mean_ve_sw"] * both["mean_ve_ne"] + both["mean_vn_sw"] * both["mean_vn_ne"]
+        results.append((dot < 0).mean())
+
+    results = np.array(results)
+    return np.median(results) * 100, np.percentile(results, 2.5) * 100, np.percentile(results, 97.5) * 100
+
+
+poster_n_both, poster_reversed_pct = poster_reversal_point_estimate(poster_vel_per_drifter)
+poster_rev_med, poster_rev_lo, poster_rev_hi = poster_bootstrap_reversal(poster_vel_per_drifter)
+
+poster_n_both_eicc, poster_reversed_pct_eicc = poster_reversal_point_estimate(
+    poster_vel_per_drifter, lon_range=POSTER_EICC_LON_RANGE
+)
+poster_rev_med_eicc, poster_rev_lo_eicc, poster_rev_hi_eicc = poster_bootstrap_reversal(
+    poster_vel_per_drifter, lon_range=POSTER_EICC_LON_RANGE
+)
+
+# --------------------------------------------------
+# D. Circulation figure
+# --------------------------------------------------
+
+poster_fig1, poster_axes1 = plt.subplots(1, 2, figsize=(16, 8))
+
+poster_vel_norm = Normalize(vmin=0, vmax=0.9)
+poster_vel_cmap = plt.get_cmap("YlGnBu")
+
+for ax, season in zip(poster_axes1, ["Southwest", "Northeast"]):
+    season_data = poster_vel_sufficient[poster_vel_sufficient["monsoon"] == season]
+    season_insufficient = poster_vel_insufficient[poster_vel_insufficient["monsoon"] == season]
+
+    for _, cell in season_insufficient.iterrows():
+        ax.add_patch(Rectangle(
+            (cell["lon_center"] - POSTER_GRID_SIZE / 2, cell["lat_center"] - POSTER_GRID_SIZE / 2),
+            POSTER_GRID_SIZE, POSTER_GRID_SIZE,
+            facecolor="lightgrey", edgecolor="none", hatch="//", alpha=0.6, zorder=0
+        ))
+
+    for _, cell in season_data.iterrows():
+        ax.add_patch(Rectangle(
+            (cell["lon_center"] - POSTER_GRID_SIZE / 2, cell["lat_center"] - POSTER_GRID_SIZE / 2),
+            POSTER_GRID_SIZE, POSTER_GRID_SIZE,
+            facecolor=poster_vel_cmap(poster_vel_norm(cell["speed"])), edgecolor="none", zorder=0
+        ))
+
+    ax.quiver(
+        season_data["lon_center"], season_data["lat_center"],
+        season_data["u_norm"], season_data["v_norm"],
+        color="black", angles="xy", scale=25, width=0.003
+    )
+
+    ax.set_xlim(78, 99)
+    ax.set_ylim(5, 23)
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title(f"{season} Monsoon")
+    ax.set_facecolor("white")
+    ax.grid(alpha=0.2)
+
+poster_insufficient_patch = Rectangle(
+    (0, 0), 1, 1, facecolor="lightgrey", edgecolor="none", hatch="//", alpha=0.6,
+    label=f"Insufficient data (<{POSTER_MIN_DRIFTERS} drifters)"
+)
+poster_axes1[0].legend(handles=[poster_insufficient_patch], loc="upper left")
+
+poster_cbar1 = poster_fig1.colorbar(
+    plt.cm.ScalarMappable(norm=poster_vel_norm, cmap=poster_vel_cmap),
+    ax=poster_axes1, location="right", shrink=0.85, pad=0.03
+)
+poster_cbar1.set_label("Mean current speed (m/s)")
+
+poster_fig1.patch.set_facecolor("white")
+poster_fig1.savefig(
+    os.path.join(POSTER_DIR, "circulation_SW_NE.png"),
+    dpi=300, bbox_inches="tight", facecolor="white"
+)
+plt.close(poster_fig1)
+
+# --------------------------------------------------
+# E. SST distribution + threshold, then SST figure
+# --------------------------------------------------
+
+print("\nERR_SST DISTRIBUTION (for poster SST threshold)")
+poster_err_sst_all = pd.Series(ds_bob["err_sst"].values).dropna()
+print(poster_err_sst_all.describe(percentiles=[.5, .9, .95, .975, .99, .995, .999]))
+print(f"max: {poster_err_sst_all.max():.3f}")
+print(
+    f"Dropping err_sst > {POSTER_ERR_SST_MAX}: removes "
+    f"{(poster_err_sst_all > POSTER_ERR_SST_MAX).mean() * 100:.2f}% of non-null err_sst observations"
+)
+
+poster_sst_obs = poster_obs.dropna(subset=["sst", "err_sst"])
+poster_sst_obs = poster_sst_obs[poster_sst_obs["err_sst"] <= POSTER_ERR_SST_MAX].copy()
+
+poster_sst_per_drifter = (
+    poster_sst_obs
+    .groupby(["monsoon", "lat_bin", "lon_bin", "lat_center", "lon_center", "drifter_id"], observed=True)
+    .agg(mean_sst=("sst", "mean"), n_obs=("sst", "count"))
+    .reset_index()
+)
+poster_sst_per_drifter = poster_sst_per_drifter[
+    poster_sst_per_drifter["n_obs"] >= POSTER_MIN_OBS_PER_DRIFTER
+].copy()
+
+poster_sst_cell_grid = (
+    poster_sst_per_drifter
+    .groupby(["monsoon", "lat_bin", "lon_bin", "lat_center", "lon_center"], observed=True)
+    .agg(mean_sst=("mean_sst", "mean"), n_drifters=("drifter_id", "nunique"))
+    .reset_index()
+)
+
+poster_sst_all_cells = poster_sst_obs[
+    ["monsoon", "lat_bin", "lon_bin", "lat_center", "lon_center"]
+].drop_duplicates()
+poster_sst_cell_grid = poster_sst_all_cells.merge(
+    poster_sst_cell_grid, on=["monsoon", "lat_bin", "lon_bin", "lat_center", "lon_center"], how="left"
+)
+poster_sst_cell_grid["n_drifters"] = poster_sst_cell_grid["n_drifters"].fillna(0).astype(int)
+
+poster_sst_sufficient = poster_sst_cell_grid[poster_sst_cell_grid["n_drifters"] >= POSTER_MIN_DRIFTERS].copy()
+poster_sst_insufficient = poster_sst_cell_grid[poster_sst_cell_grid["n_drifters"] < POSTER_MIN_DRIFTERS].copy()
+
+poster_fig2, poster_axes2 = plt.subplots(1, 2, figsize=(16, 8))
+
+poster_sst_norm = Normalize(
+    vmin=poster_sst_sufficient["mean_sst"].min(), vmax=poster_sst_sufficient["mean_sst"].max()
+)
+poster_sst_cmap = plt.get_cmap("YlOrRd")
+
+for ax, season in zip(poster_axes2, ["Southwest", "Northeast"]):
+    season_data = poster_sst_sufficient[poster_sst_sufficient["monsoon"] == season]
+    season_insufficient = poster_sst_insufficient[poster_sst_insufficient["monsoon"] == season]
+
+    for _, cell in season_insufficient.iterrows():
+        ax.add_patch(Rectangle(
+            (cell["lon_center"] - POSTER_GRID_SIZE / 2, cell["lat_center"] - POSTER_GRID_SIZE / 2),
+            POSTER_GRID_SIZE, POSTER_GRID_SIZE,
+            facecolor="lightgrey", edgecolor="none", hatch="//", alpha=0.6, zorder=0
+        ))
+
+    for _, cell in season_data.iterrows():
+        ax.add_patch(Rectangle(
+            (cell["lon_center"] - POSTER_GRID_SIZE / 2, cell["lat_center"] - POSTER_GRID_SIZE / 2),
+            POSTER_GRID_SIZE, POSTER_GRID_SIZE,
+            facecolor=poster_sst_cmap(poster_sst_norm(cell["mean_sst"])), edgecolor="none", zorder=0
+        ))
+
+    ax.set_xlim(78, 99)
+    ax.set_ylim(5, 23)
+    ax.set_xlabel("Longitude")
+    ax.set_ylabel("Latitude")
+    ax.set_title(f"{season} Monsoon")
+    ax.set_facecolor("white")
+    ax.grid(alpha=0.2)
+
+poster_axes2[0].legend(handles=[poster_insufficient_patch], loc="upper left")
+
+poster_cbar2 = poster_fig2.colorbar(
+    plt.cm.ScalarMappable(norm=poster_sst_norm, cmap=poster_sst_cmap),
+    ax=poster_axes2, location="right", shrink=0.85, pad=0.03
+)
+poster_cbar2.set_label("Mean sea surface temperature (°C)")
+
+poster_fig2.patch.set_facecolor("white")
+poster_fig2.savefig(
+    os.path.join(POSTER_DIR, "sst_SW_NE.png"),
+    dpi=300, bbox_inches="tight", facecolor="white"
+)
+plt.close(poster_fig2)
+
+poster_sst_cells_kept = poster_sst_sufficient.groupby("monsoon").size()
+
+# --------------------------------------------------
+# F. Numbers file
+# --------------------------------------------------
+
+poster_lines = []
+poster_lines.append("POSTER PRELIMINARY RESULTS -- NUMBERS")
+poster_lines.append(f"Rule: drogued only, 1x1 deg cells, >= {POSTER_MIN_DRIFTERS} drifters each with "
+                     f">= {POSTER_MIN_OBS_PER_DRIFTER} hourly obs, drifter-weighted mean")
+poster_lines.append("")
+poster_lines.append(f"Bay of Bengal observations (SW+NE months): {len(poster_all)}")
+poster_lines.append(f"Distinct drifters (SW+NE months): {poster_all['drifter_id'].nunique()}")
+poster_lines.append("")
+poster_lines.append("Circulation map -- cells kept per season:")
+poster_lines.append(f"  Southwest: {poster_cells_kept.get('Southwest', 0)}")
+poster_lines.append(f"  Northeast: {poster_cells_kept.get('Northeast', 0)}")
+poster_lines.append("")
+poster_lines.append("Drogued share of observations, per season:")
+poster_lines.append(f"  Southwest: {poster_drogued_share.get('Southwest', float('nan')):.1f}%")
+poster_lines.append(f"  Northeast: {poster_drogued_share.get('Northeast', float('nan')):.1f}%")
+poster_lines.append("")
+poster_lines.append(f"Cells with data in both seasons: {poster_n_both}")
+poster_lines.append("")
+poster_lines.append("SW vs NE direction reversal (>90 degrees), whole bay:")
+poster_lines.append(f"  point estimate: {poster_reversed_pct:.1f}% ({poster_n_both} cells)")
+poster_lines.append(
+    f"  bootstrap ({POSTER_N_BOOT} resamples, whole drifters): median {poster_rev_med:.1f}%, "
+    f"95% CI ({poster_rev_lo:.1f}%, {poster_rev_hi:.1f}%)"
+)
+poster_lines.append("")
+poster_lines.append(
+    f"SW vs NE direction reversal (>90 degrees), {POSTER_EICC_LON_RANGE[0]:.0f}-"
+    f"{POSTER_EICC_LON_RANGE[1]:.0f}E band (approx. EICC):"
+)
+poster_lines.append(f"  point estimate: {poster_reversed_pct_eicc:.1f}% ({poster_n_both_eicc} cells)")
+poster_lines.append(
+    f"  bootstrap ({POSTER_N_BOOT} resamples, whole drifters): median {poster_rev_med_eicc:.1f}%, "
+    f"95% CI ({poster_rev_lo_eicc:.1f}%, {poster_rev_hi_eicc:.1f}%)"
+)
+poster_lines.append("")
+poster_lines.append("SST map -- cells kept per season "
+                     f"(err_sst <= {POSTER_ERR_SST_MAX}, same drifter/obs rule):")
+poster_lines.append(f"  Southwest: {poster_sst_cells_kept.get('Southwest', 0)}")
+poster_lines.append(f"  Northeast: {poster_sst_cells_kept.get('Northeast', 0)}")
+
+poster_numbers_text = "\n".join(poster_lines)
+print("\n" + poster_numbers_text)
+
+with open(os.path.join(POSTER_DIR, "poster_numbers.txt"), "w") as f:
+    f.write(poster_numbers_text + "\n")
+
+plt.rcParams.update({"font.size": plt.rcParamsDefault["font.size"]})
