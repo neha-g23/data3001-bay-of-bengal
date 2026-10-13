@@ -2,13 +2,6 @@ r"""
 Bay of Bengal surface circulation: Southwest vs Northeast monsoon,
 from NOAA GDP hourly drifters (clouddrift).
 
-Run:   .venv313\Scripts\python.exe project3001.py
-
-Nothing pops up. Everything is written to outputs/:
-    outputs/figures/*.png   every figure
-    outputs/tables/*.csv    every table (gridded climatology, reversal, sensitivity, ...)
-    outputs/report.txt      everything printed while running
-    outputs/summary.txt     the headline numbers
 """
 import os
 import sys
@@ -25,7 +18,7 @@ import xarray as xr
 
 
 # ============================================================
-# Settings (see the Proposed Method in CLAUDE.md)
+# Settings
 # ============================================================
 
 LON_RANGE = (78.0, 99.0)
