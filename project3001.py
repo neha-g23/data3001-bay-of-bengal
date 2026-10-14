@@ -1,7 +1,52 @@
 r"""
-Bay of Bengal surface circulation: Southwest vs Northeast monsoon,
-from NOAA GDP hourly drifters (clouddrift).
+Bay of Bengal Surface Circulation: Southwest vs Northeast Monsoon
+=================================================================
 
+Purpose
+-------
+Estimates how strongly the surface currents of the Bay of Bengal reverse
+between the Southwest monsoon (June-September) and the Northeast monsoon
+(December-February), and how confident we can be in those estimates. The
+result is a gridded seasonal climatology of mean surface current and sea
+surface temperature (SST), with an uncertainty estimate for every grid cell.
+
+Data
+----
+NOAA Global Drifter Program (GDP) hourly drifter dataset, accessed through the
+`clouddrift` package, restricted to 5-23°N, 78-99°E.
+
+Method in brief
+---------------
+1. Clean the data: remove observations with missing time, position or
+   velocity, speeds above 3 m/s, and duplicate records.
+2. Keep drogued drifters only for the main analysis (undrogued drifters are
+   pushed by the wind). The analysis is repeated with all drifters as a
+   robustness check.
+3. Grid the observations into 1° cells. A cell is mapped only if at least
+   3 different drifters each spent at least 12 hours in it.
+4. Average each drifter's mean velocity in a cell, so that every drifter counts
+   equally. This stops a single drifter caught in an eddy from dominating.
+5. Estimate uncertainty by resampling whole drifters (bootstrap). Cells with
+   10 or more drifters are labelled high confidence, 3-9 low confidence.
+6. Report the percentage of cells where the current direction changes by more
+   than 90° between monsoons, for the whole Bay and for the western Bay
+   (80-85°E, an approximate East India Coastal Current band), with 95%
+   confidence intervals.
+
+How to run
+----------
+    .venv313\Scripts\python.exe project3001.py
+
+The first run downloads and subsets the global dataset (a few minutes) and
+caches it to `bob_subset.nc`. Later runs take about 20 seconds.
+
+Outputs (written to `outputs/`)
+-------------------------------
+    figures/   maps and charts (PNG)
+    tables/    gridded climatology and supporting tables (CSV)
+    report.txt full printed log of the run
+    summary.txt headline numbers
+    reversal_caption.txt  ready-to-use caption for the reversal map
 """
 import os
 import sys
@@ -20,36 +65,52 @@ import xarray as xr
 # ============================================================
 # Settings
 # ============================================================
+# All method choices are set here so they can be reviewed or changed in one
+# place. The rest of the script reads these values and contains no other
+# hard-coded thresholds.
 
-LON_RANGE = (78.0, 99.0)
-LAT_RANGE = (5.0, 23.0)
-GRID = 1.0                       # grid cell size in degrees
+# --- Study region and grid ---
+LON_RANGE = (78.0, 99.0)         # longitude limits, degrees East
+LAT_RANGE = (5.0, 23.0)          # latitude limits, degrees North
+GRID = 1.0                       # grid cell size, degrees
 
+# --- Monsoon seasons (calendar month -> season; other months are not analysed) ---
 SEASONS = ["Southwest", "Northeast"]
 SEASON_OF_MONTH = {6: "Southwest", 7: "Southwest", 8: "Southwest", 9: "Southwest",
                    12: "Northeast", 1: "Northeast", 2: "Northeast"}
 
-MAX_SPEED = 3.0                  # m/s, faster observations are dropped as unrealistic
-MIN_OBS_PER_DRIFTER = 12         # hourly obs a drifter needs in a cell to count there
-MIN_DRIFTERS = 3                 # qualifying drifters a cell needs to be mapped
-HIGH_CONF_DRIFTERS = 10          # >= this many drifters = high confidence, else low
-N_BOOT = 500
-SEED = 0
-EICC_LON = (80.0, 85.0)          # approximate EICC band: a longitude band, not a coastline mask
-ERR_SST_MAX = 0.5                # deg C, SST observations with larger error are dropped
-MIN_SPEED_FOR_PCT = 0.05         # m/s, % speed differences are only computed above this
+# --- Quality control and mapping rules ---
+MAX_SPEED = 3.0                  # m/s; faster observations are removed as unrealistic
+MIN_OBS_PER_DRIFTER = 12         # hours a drifter must spend in a cell to count towards it
+MIN_DRIFTERS = 3                 # qualifying drifters a cell needs before it is mapped
+HIGH_CONF_DRIFTERS = 10          # cells with at least this many drifters are "high confidence"
+ERR_SST_MAX = 0.5                # °C; SST readings with a larger reported error are removed
+MIN_SPEED_FOR_PCT = 0.05         # m/s; percentage speed differences are only shown above this,
+                                 # since a percentage of a near-zero speed is not meaningful
 
-# Threshold sensitivity grid
+# --- Uncertainty estimation ---
+N_BOOT = 500                     # number of bootstrap resamples
+SEED = 0                         # random seed, so results are reproducible
+
+# --- East India Coastal Current (EICC) band ---
+EICC_LON = (80.0, 85.0)          # western Bay longitude band used as an approximate EICC region
+                                 # (a simple longitude band, not a coastline-following mask)
+
+# --- Threshold sensitivity test: combinations of mapping rules to compare ---
 SENS_MIN_DRIFTERS = [1, 3, 5, 10]
 SENS_MIN_OBS = [1, 6, 12, 24, 48]
 
+# --- File locations ---
 HERE = os.path.dirname(os.path.abspath(__file__))
-CACHE_PATH = os.path.join(HERE, "bob_subset.nc")   # delete if LON_RANGE / LAT_RANGE change
+CACHE_PATH = os.path.join(HERE, "bob_subset.nc")   # local copy of the regional data;
+                                                   # delete it if the region above changes
 OUT_DIR = os.path.join(HERE, "outputs")
 FIG_DIR = os.path.join(OUT_DIR, "figures")
 TAB_DIR = os.path.join(OUT_DIR, "tables")
 
-CELL = ["monsoon", "lon0", "lat0"]   # lon0/lat0 = south-west corner of a grid cell
+# Columns that identify one grid cell in one season. lon0 / lat0 are the
+# south-west corner of the cell; lon / lat (added later) are its centre.
+CELL = ["monsoon", "lon0", "lat0"]
 
 plt.rcParams.update({"font.size": 12})
 pd.set_option("display.width", 200)
@@ -59,9 +120,10 @@ pd.set_option("display.max_columns", 30)
 # ============================================================
 # Output helpers
 # ============================================================
+# Small utilities for writing the report, figures and tables to outputs/.
 
 class Tee:
-    """Send print() output to the console and to report.txt at the same time."""
+    """Send printed output to the screen and to report.txt at the same time."""
 
     def __init__(self, *streams):
         self.streams = streams
@@ -76,19 +138,23 @@ class Tee:
 
 
 def section(title):
+    """Print a section heading in the report."""
     print(f"\n{'=' * 70}\n{title}\n{'=' * 70}")
 
 
 def save_fig(fig, name, dpi=200):
+    """Save a figure to outputs/figures/ and close it."""
     path = os.path.join(FIG_DIR, name)
     if os.path.exists(path):
-        os.remove(path)     # overwriting a OneDrive placeholder in place fails with Errno 22
+        os.remove(path)     # remove the old file first; overwriting in place can fail in
+                            # cloud-synced folders such as OneDrive
     fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"  -> figures/{name}")
 
 
 def save_table(df, name, index=False):
+    """Save a table to outputs/tables/ as CSV."""
     df.to_csv(os.path.join(TAB_DIR, name), index=index)
     print(f"  -> tables/{name}")
 
@@ -96,20 +162,22 @@ def save_table(df, name, index=False):
 # ============================================================
 # Land overlay (Natural Earth coastline)
 # ============================================================
-# Land is drawn as filled coastline polygons above the data cells (so coastal
-# cells are partly covered, like any gridded ocean map) and below arrows and
-# outlines. Needs cartopy; the Natural Earth 50m coastline (~2 MB) is
-# downloaded once. If that fails, a warning is printed and maps have no land.
+# Land is drawn as semi-transparent coastline shapes on top of the coloured
+# data cells, so coastal cells remain visible underneath, and below the current
+# arrows. The coastline comes from Natural Earth (1:50m scale, about 2 MB) via
+# cartopy and is downloaded once. If it cannot be loaded, a warning is printed
+# and the maps are drawn without land; all results are unaffected.
 
-LAND_COLOR = (0.78, 0.71, 0.54, 0.35)   # see-through sand, so coastal cells show through;
+LAND_COLOR = (0.78, 0.71, 0.54, 0.35)   # semi-transparent sand colour, chosen to be
                                         # distinct from the grey "insufficient data" hatching
 COAST_COLOR = "#4d4d4d"
-LAND_ZORDER = 1.5           # data cells 0 < land < arrows / outlines 3
+LAND_ZORDER = 1.5           # drawing order: data cells (0) < land (1.5) < arrows (3)
 
-_land_polys = None   # None = not loaded yet, [] = loading failed
+_land_polys = None   # coastline shapes, loaded on first use ([] if loading failed)
 
 
 def _polygons_of(geom):
+    """Break a shape into its individual polygons."""
     if geom.geom_type == "Polygon":
         yield geom
     elif hasattr(geom, "geoms"):
@@ -118,6 +186,7 @@ def _polygons_of(geom):
 
 
 def _get_land(margin=1.0):
+    """Coastline polygons clipped to the study region (loaded once, then reused)."""
     global _land_polys
     if _land_polys is None:
         try:
@@ -140,6 +209,7 @@ def _get_land(margin=1.0):
 
 
 def add_land(ax):
+    """Draw land on a map."""
     if _get_land():
         ax.add_collection(PolyCollection(_get_land(), facecolors=LAND_COLOR, edgecolors=COAST_COLOR,
                                          linewidths=0.6, zorder=LAND_ZORDER), autolim=False)
@@ -149,6 +219,7 @@ EICC_LINE_STYLE = dict(color="black", linestyle="--", linewidth=1.2, zorder=4)
 
 
 def add_land_legend(ax, extra_handles=(), loc="upper left", fontsize=9):
+    """Map legend showing land, the EICC band, and any extra entries passed in."""
     handles = list(extra_handles)
     if _get_land():
         handles.append(Patch(facecolor=LAND_COLOR, edgecolor=COAST_COLOR, label="Land"))
@@ -160,6 +231,8 @@ def add_land_legend(ax, extra_handles=(), loc="upper left", fontsize=9):
 # ============================================================
 # Map helpers
 # ============================================================
+# Every map in the report is drawn with these functions, so all maps share the
+# same layout, colour handling and "insufficient data" hatching.
 
 INSUFFICIENT_STYLE = dict(facecolor="lightgrey", edgecolor="grey", hatch="//", alpha=0.6, linewidth=0)
 INSUFFICIENT_PATCH = Patch(**INSUFFICIENT_STYLE,
@@ -168,11 +241,13 @@ INSUFFICIENT_PATCH = Patch(**INSUFFICIENT_STYLE,
 
 
 def _cell_polys(g):
+    """The four corners of each grid cell, for drawing."""
     return [[(x, y), (x + GRID, y), (x + GRID, y + GRID), (x, y + GRID)]
             for x, y in zip(g["lon0"], g["lat0"])]
 
 
 def setup_map(ax, title, xlim=LON_RANGE):
+    """Axis limits, labels, title, and dashed lines marking the EICC band."""
     ax.set_xlim(*xlim)
     ax.set_ylim(*LAT_RANGE)
     ax.set_xlabel("Longitude (°E)")
@@ -184,6 +259,7 @@ def setup_map(ax, title, xlim=LON_RANGE):
 
 
 def draw_cells(ax, g, values, cmap, norm):
+    """Fill each grid cell with a colour representing its value."""
     if len(g):
         ax.add_collection(PolyCollection(_cell_polys(g), array=np.asarray(values, dtype=float),
                                          cmap=cmap, norm=norm, edgecolors="none", zorder=0),
@@ -191,6 +267,7 @@ def draw_cells(ax, g, values, cmap, norm):
 
 
 def draw_insufficient(ax, g):
+    """Hatch cells that were sampled but have too few drifters to be mapped."""
     if len(g):
         ax.add_collection(PolyCollection(
             _cell_polys(g), facecolors=INSUFFICIENT_STYLE["facecolor"],
@@ -199,7 +276,9 @@ def draw_insufficient(ax, g):
 
 
 def season_cell_map(ax, g, value_col, cmap, norm, title, arrows=False):
-    """Colour sufficient cells by value_col, hatch insufficient ones, optional direction arrows."""
+    """One season's map: cells with enough data are coloured by value_col, cells
+    without enough data are hatched, and arrows (optional) show current direction.
+    Arrows all have the same length; speed is shown by the cell colour."""
     ok = g[g["sufficient"]]
     draw_insufficient(ax, g[~g["sufficient"]])
     draw_cells(ax, ok, ok[value_col], cmap, norm)
@@ -212,6 +291,7 @@ def season_cell_map(ax, g, value_col, cmap, norm, title, arrows=False):
 
 
 def add_colorbar(fig, axes, cmap, norm, label):
+    """Shared colour scale for one or more maps."""
     cbar = fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=axes,
                         location="right", shrink=0.85, pad=0.03)
     cbar.set_label(label)
@@ -223,6 +303,9 @@ def add_colorbar(fig, axes, cmap, norm, label):
 # ============================================================
 
 def load_subset():
+    """Load the Bay of Bengal drifter data. Uses the local copy if one exists;
+    otherwise streams the global GDP hourly dataset, cuts it to the study
+    region, and saves a local copy for future runs."""
     if os.path.exists(CACHE_PATH):
         print(f"Loading cached subset: {CACHE_PATH}")
         return xr.open_dataset(CACHE_PATH)
@@ -238,6 +321,7 @@ def load_subset():
 
 
 def data_quality_table(ds):
+    """Missing-value counts and value ranges for the key variables, before cleaning."""
     cols = ["lat", "lon", "ve", "vn", "err_ve", "err_vn", "sst", "err_sst", "drogue_status", "gap"]
     df = ds[[c for c in cols if c in ds]].to_dataframe()
     numeric = df.select_dtypes("number")
@@ -251,9 +335,10 @@ def data_quality_table(ds):
 
 
 def build_obs_table(ds):
-    """One row per hourly observation, with its drifter id. In the ragged array,
-    observations are stored contiguously by drifter, so repeating each id by its
-    rowsize lines the ids up with the observations."""
+    """Flatten the dataset into a table with one row per hourly observation,
+    labelled with the drifter that made it. The source data stores each
+    drifter's observations one after another, along with how many there are,
+    so repeating each drifter ID that many times labels every observation."""
     return pd.DataFrame({
         "drifter_id": np.repeat(ds["id"].values, ds["rowsize"].values.astype(int)),
         "time": pd.to_datetime(ds["time"].values),
@@ -268,7 +353,9 @@ def build_obs_table(ds):
 
 
 def clean_obs(obs):
-    """Drop missing / unrealistic / duplicate rows and report what was removed."""
+    """Remove missing, unrealistic and duplicate observations, recording how many
+    each step removed. Then label each observation with its monsoon season and
+    the grid cell it falls in."""
     steps = [{"step": "raw observations", "removed": 0, "remaining": len(obs)}]
 
     def drop(mask, reason):
@@ -286,6 +373,8 @@ def clean_obs(obs):
     obs["year"] = obs["time"].dt.year
     obs["monsoon"] = obs["month"].map(SEASON_OF_MONTH).fillna("Inter-monsoon")
 
+    # Grid cell (south-west corner) of each observation. Points exactly on the
+    # outer edge of the region are placed in the last cell rather than outside it.
     n_cells_x = int(round((LON_RANGE[1] - LON_RANGE[0]) / GRID))
     n_cells_y = int(round((LAT_RANGE[1] - LAT_RANGE[0]) / GRID))
     obs["lon0"] = LON_RANGE[0] + GRID * np.clip(np.floor((obs["lon"] - LON_RANGE[0]) / GRID), 0, n_cells_x - 1)
@@ -296,9 +385,14 @@ def clean_obs(obs):
 # ============================================================
 # Gridding: drifter-weighted cell means
 # ============================================================
+# A drifter caught in an eddy can record hundreds of hours in one cell. If every
+# hourly observation counted equally, that one drifter would dominate the cell.
+# Instead, each drifter's observations in a cell are first averaged, and the
+# cell value is the average of those drifter means: one drifter, one vote.
 
 def per_drifter_means(obs, cols=("ve", "vn")):
-    """One mean per drifter, per cell, per monsoon."""
+    """Mean of each variable for every drifter, in every cell, in each monsoon,
+    together with how many hourly observations that drifter contributed."""
     named = {c: (c, "mean") for c in cols}
     return (obs.groupby(CELL + ["drifter_id"])
                .agg(**named, n_obs=(cols[0], "count"))
@@ -306,9 +400,11 @@ def per_drifter_means(obs, cols=("ve", "vn")):
 
 
 def cell_grid(per, cols, min_obs=MIN_OBS_PER_DRIFTER, min_drifters=MIN_DRIFTERS):
-    """Average the per-drifter means across drifters, so each drifter counts once.
-    Only drifters with >= min_obs observations in the cell count. Returns every
-    sampled cell, with 'sufficient' = at least min_drifters qualifying drifters."""
+    """Cell value = average of the per-drifter means, so each drifter counts once.
+    Only drifters with at least min_obs hourly observations in the cell are used.
+    Every sampled cell is returned; 'sufficient' is True where at least
+    min_drifters drifters qualify (cells without enough data are kept so that
+    the maps can show them as hatched)."""
     kept = per[per["n_obs"] >= min_obs]
     named = {c: (c, "mean") for c in cols}
     g = (kept.groupby(CELL)
@@ -323,15 +419,25 @@ def cell_grid(per, cols, min_obs=MIN_OBS_PER_DRIFTER, min_drifters=MIN_DRIFTERS)
 
 
 def velocity_grid(per, min_obs=MIN_OBS_PER_DRIFTER, min_drifters=MIN_DRIFTERS):
+    """Gridded mean current: eastward (ve) and northward (vn) velocity in m/s,
+    plus the speed and direction of the mean current."""
     g = cell_grid(per, ["ve", "vn"], min_obs, min_drifters)
     g["speed"] = np.hypot(g["ve"], g["vn"])
-    g["direction_deg"] = np.degrees(np.arctan2(g["vn"], g["ve"]))   # 0 = east, 90 = north
+    g["direction_deg"] = np.degrees(np.arctan2(g["vn"], g["ve"]))   # 0° = flowing east, 90° = north
     return g
 
 
 def add_bootstrap_se(grid, per, seed=SEED):
-    """Standard error of each sufficient cell's mean, by resampling its drifters
-    with replacement, plus the high / low confidence tier."""
+    """Add an uncertainty (standard error) to each mapped cell, and a confidence label.
+
+    The standard error is estimated by bootstrapping: the cell's drifters are
+    resampled with replacement N_BOOT times and the mean recomputed each time;
+    the spread of those means is the standard error. Resampling drifters rather
+    than hourly observations is important, because consecutive hourly readings
+    from the same drifter are not independent.
+
+    Confidence: "high" = HIGH_CONF_DRIFTERS or more drifters, "low" = fewer but
+    still mapped, "insufficient" = not mapped."""
     rng = np.random.default_rng(seed)
     kept = per[per["n_obs"] >= MIN_OBS_PER_DRIFTER]
     rows = []
@@ -353,25 +459,31 @@ def add_bootstrap_se(grid, per, seed=SEED):
 # ============================================================
 # Monsoon reversal
 # ============================================================
+# For each cell mapped in both seasons, compare the direction of the Southwest
+# and Northeast mean currents. A change of more than 90° counts as a reversal.
 
 def in_eicc(lon0):
+    """True for cells inside the approximate EICC longitude band."""
     return (lon0 >= EICC_LON[0]) & (lon0 < EICC_LON[1])
 
 
 def angle_between(u1, v1, u2, v2):
-    """Smallest angle between two vectors, 0-180 degrees."""
+    """Smallest angle between two current directions, from 0° (same direction)
+    to 180° (exactly opposite)."""
     d = np.degrees(np.arctan2(v2, u2) - np.arctan2(v1, u1))
     return np.abs((d + 180) % 360 - 180)
 
 
+# Categories of direction change used in the reversal map and tables
 ANGLE_BINS = [0, 45, 90, 135, 180]
 ANGLE_LABELS = ["little change (<45)", "moderate (45-90)", "strong (90-135)", "near-opposite (>135)"]
 ANGLE_COLORS = ["#2166ac", "#92c5de", "#f4a582", "#b2182b"]   # blues = not reversed, reds = reversed
 
 
 def paired_cells(grid):
-    """Cells sufficient in BOTH monsoons, with the SW-to-NE direction change.
-    Reversed = the two mean current vectors differ by more than 90 degrees."""
+    """Cells with enough data in BOTH monsoons, side by side (_sw / _ne columns),
+    with the change in current direction from Southwest to Northeast monsoon.
+    A cell is 'reversed' if the direction changes by more than 90°."""
     g = grid[grid["sufficient"]].set_index(["lon0", "lat0"])
     cols = ["ve", "vn", "speed", "n_drifters"]
     both = (g[g["monsoon"] == "Southwest"][cols]
@@ -387,23 +499,30 @@ def paired_cells(grid):
 
 
 def bootstrap_reversal(per, eicc_only=False, seed=SEED, thresholds=(90, 135)):
-    """Resample whole drifters with replacement (a drifter drawn twice counts twice
-    in the means) and recompute the % of both-season cells whose direction changes
-    by more than each threshold. A cell still needs MIN_DRIFTERS *distinct* drifters
-    per season, as in the point estimate. Returns a (len(thresholds), 3) array of
-    2.5 / 50 / 97.5 percentiles."""
+    """95% confidence interval for the percentage of cells that reverse.
+
+    Whole drifters are resampled with replacement N_BOOT times (a drifter drawn
+    twice counts twice). Each time, the cell means are rebuilt and the
+    percentage of cells whose direction changes by more than each threshold is
+    recalculated. As in the main estimate, a cell needs at least MIN_DRIFTERS
+    different drifters in each season to count. With eicc_only=True only the
+    EICC band is used.
+
+    Returns one row per threshold: [2.5th percentile, median, 97.5th percentile]."""
     q = per[per["n_obs"] >= MIN_OBS_PER_DRIFTER]
     if eicc_only:
         q = q[in_eicc(q["lon0"])]
     ids, drifter_idx = np.unique(q["drifter_id"].to_numpy(), return_inverse=True)
     cells, cell_idx = np.unique(q[["lon0", "lat0"]].to_numpy(), axis=0, return_inverse=True)
-    code = cell_idx.ravel() * 2 + (q["monsoon"].to_numpy() == "Northeast")   # (cell, season) slot
+    code = cell_idx.ravel() * 2 + (q["monsoon"].to_numpy() == "Northeast")   # one slot per (cell, season)
     n_slots = len(cells) * 2
     ve, vn = q["ve"].to_numpy(), q["vn"].to_numpy()
 
     rng = np.random.default_rng(seed)
     results = []
     for _ in range(N_BOOT):
+        # w = how many times each drifter was drawn in this resample (0, 1, 2, ...);
+        # cell means are then weighted averages using these counts
         w = np.bincount(rng.integers(0, len(ids), len(ids)), minlength=len(ids))[drifter_idx]
         w_sum = np.bincount(code, w, n_slots)
         n_distinct = np.bincount(code, w > 0, n_slots)
@@ -420,11 +539,14 @@ def bootstrap_reversal(per, eicc_only=False, seed=SEED, thresholds=(90, 135)):
 
 
 # ============================================================
-# Pipeline
+# Analysis steps
 # ============================================================
+# Each function below produces one part of the report, with its figures and
+# tables. run() calls them in order.
 
 def explore(ds, obs):
-    """Coverage, drogue status and speed diagnostics on the cleaned data (all months)."""
+    """Overview of the cleaned data (all months): when and where drifters
+    sampled, the share that were drogued, and current speeds by drogue status."""
     section("COVERAGE")
     coverage = (obs.groupby("monsoon")
                    .agg(observations=("time", "size"), unique_drifters=("drifter_id", "nunique"),
@@ -434,6 +556,7 @@ def explore(ds, obs):
     print(coverage.round(1))
     save_table(coverage, "coverage_by_monsoon.csv", index=True)
 
+    # Observations per month and per year
     monthly = obs["month"].value_counts().sort_index()
     yearly = obs["year"].value_counts().sort_index()
     save_table(pd.DataFrame({"observations": monthly}), "observations_by_month.csv", index=True)
@@ -461,8 +584,9 @@ def explore(ds, obs):
     ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left")
     save_fig(ax.figure, "02_drogue_by_monsoon.png")
 
-    # Speed by drogue status: if undrogued drifters run faster, that supports
-    # treating their velocities as wind-contaminated
+    # Speed by drogue status. Undrogued drifters moving faster than drogued ones
+    # supports the view that their velocities are affected by wind, and is the
+    # reason the main analysis uses drogued drifters only.
     section("CURRENT SPEED BY DROGUE STATUS")
     season_obs = obs[obs["monsoon"].isin(SEASONS)].assign(speed=lambda d: np.hypot(d["ve"], d["vn"]))
     speed_summary = (season_obs.groupby(["monsoon", "drogue"])["speed"]
@@ -480,20 +604,24 @@ def explore(ds, obs):
     fig.suptitle("Current speed by drogue status")
     save_fig(fig, "03_speed_by_drogue.png")
 
-    # Raw observation density vs distinct drifters per cell (fine 50 x 50 grid).
-    # Raw counts reflect sampling effort; one looping drifter can inflate them.
+    # Sampling maps on a fine 50 x 50 grid: number of hourly observations vs
+    # number of different drifters per cell. Observation counts can be inflated
+    # by a single drifter circling in one place; drifter counts show how many
+    # independent samples each area actually has.
     bins = [np.linspace(*LON_RANGE, 51), np.linspace(*LAT_RANGE, 51)]
     counts, xe, ye = np.histogram2d(obs["lon"], obs["lat"], bins=bins)
     ix = np.clip(np.searchsorted(xe, obs["lon"], side="right") - 1, 0, 49)
     iy = np.clip(np.searchsorted(ye, obs["lat"], side="right") - 1, 0, 49)
+    # Count each drifter once per cell: keep only its first observation there
     first_visit = ~pd.DataFrame({"d": obs["drifter_id"].to_numpy(), "x": ix, "y": iy}).duplicated().to_numpy()
     unique, _, _ = np.histogram2d(obs["lon"][first_visit], obs["lat"][first_visit], bins=bins)
 
-    fig, axes = plt.subplots(1, 2, figsize=(18, 7), constrained_layout=True)
-    for ax, grid, cmap_name, label, title in [
-        (axes[0], counts, "YlOrBr", "Observations per cell", "Observation density"),
-        (axes[1], unique, "YlGnBu", "Distinct drifters per cell", "Distinct drifter coverage"),
-    ]:
+    panels = [
+        (counts, "YlOrBr", "Observations per cell", "Observation density"),
+        (unique, "YlGnBu", "Distinct drifters per cell", "Distinct drifter coverage"),
+    ]
+
+    def draw_density(fig, ax, grid, cmap_name, label, title, legend=True):
         g = np.where(grid == 0, np.nan, grid)
         cmap = plt.get_cmap(cmap_name).copy()
         cmap.set_bad("white")
@@ -501,10 +629,21 @@ def explore(ds, obs):
         add_land(ax)
         fig.colorbar(im, ax=ax, label=label)
         setup_map(ax, title)
-    add_land_legend(axes[0])
+        if legend:
+            add_land_legend(ax)
+
+    # Each panel on its own, then side by side
+    for panel, fname in zip(panels, ["04a_observation_density.png", "04b_distinct_drifter_density.png"]):
+        fig, ax = plt.subplots(figsize=(10, 8), constrained_layout=True)
+        draw_density(fig, ax, *panel)
+        save_fig(fig, fname)
+
+    fig, axes = plt.subplots(1, 2, figsize=(18, 7), constrained_layout=True)
+    for ax, panel in zip(axes, panels):
+        draw_density(fig, ax, *panel, legend=ax is axes[0])
     save_fig(fig, "04_density_and_unique_drifters.png")
 
-    # Trajectories, first fix of each drifter in red
+    # Drifter tracks, with each drifter's first position in the region marked in red
     fig, ax = plt.subplots(figsize=(10, 8))
     for _, d in obs.groupby("drifter_id", sort=False):
         ax.plot(d["lon"], d["lat"], linewidth=0.4, alpha=0.15, color="blue")
@@ -516,6 +655,9 @@ def explore(ds, obs):
 
 
 def threshold_sensitivity(per):
+    """Repeat the mapping and reversal calculation for a range of minimum-drifter
+    and minimum-hours rules, to show how the results depend on these choices.
+    This is how the chosen thresholds (MIN_DRIFTERS, MIN_OBS_PER_DRIFTER) were selected."""
     section("THRESHOLD SENSITIVITY (drogued only)")
     rows = []
     for md in SENS_MIN_DRIFTERS:
@@ -536,11 +678,15 @@ def threshold_sensitivity(per):
 
 
 def circulation_figures(grid_dr, grid_all):
+    """Maps of mean surface current for each monsoon (main result), the same
+    maps with undrogued drifters included for comparison, and the uncertainty map."""
     section("CIRCULATION MAPS")
+    # Same speed colour scale on every map so they can be compared directly
     vmax = np.ceil(pd.concat([grid_dr.loc[grid_dr["sufficient"], "speed"],
                               grid_all.loc[grid_all["sufficient"], "speed"]]).max() * 10) / 10
     norm, cmap = Normalize(0, vmax), plt.get_cmap("YlGnBu")
 
+    # Main result: drogued drifters only
     fig, axes = plt.subplots(1, 2, figsize=(16, 7.5), constrained_layout=True)
     for ax, season in zip(axes, SEASONS):
         season_cell_map(ax, grid_dr[grid_dr["monsoon"] == season], "speed", cmap, norm,
@@ -550,6 +696,7 @@ def circulation_figures(grid_dr, grid_all):
     fig.suptitle("Drifter-weighted mean surface circulation (drogued drifters only)", fontsize=15)
     save_fig(fig, "06_circulation_drogued.png", dpi=300)
 
+    # Comparison: all drifters (top) vs drogued only (bottom)
     fig, axes = plt.subplots(2, 2, figsize=(16, 14), constrained_layout=True)
     for row, (label, grid) in enumerate([("All data", grid_all), ("Drogued only", grid_dr)]):
         for ax, season in zip(axes[row], SEASONS):
@@ -560,7 +707,9 @@ def circulation_figures(grid_dr, grid_all):
     fig.suptitle("Sensitivity of mean circulation to drogue status", fontsize=15)
     save_fig(fig, "07_circulation_all_vs_drogued.png")
 
-    # Uncertainty: bootstrap standard error of the speed, drogued only
+    # Uncertainty: bootstrap standard error of the speed, drogued only.
+    # Colour scale capped at the 95th percentile so a few extreme cells do not
+    # wash out the rest; dots mark high-confidence cells.
     se_max = grid_dr["se_speed"].quantile(0.95)
     se_norm, se_cmap = Normalize(0, se_max), plt.get_cmap("Oranges")
     fig, axes = plt.subplots(1, 2, figsize=(16, 7.5), constrained_layout=True)
@@ -577,6 +726,10 @@ def circulation_figures(grid_dr, grid_all):
 
 
 def reversal_analysis(per_dr, per_all, grid_dr, grid_all):
+    """Headline result: the percentage of cells whose current reverses (> 90°)
+    and strongly reverses (> 135°) between monsoons, with 95% confidence
+    intervals, for the whole Bay and the EICC band, using both drogued-only and
+    all data. Also draws the reversal map and writes its caption."""
     section(f"MONSOON REVERSAL (SW vs NE direction differs by > 90 deg, {N_BOOT} drifter bootstrap)")
     rows = []
     paired = {}
@@ -605,21 +758,24 @@ def reversal_analysis(per_dr, per_all, grid_dr, grid_all):
                       margins=True))
     save_table(cells, "reversal_cells_drogued.csv")
 
-    # Southern edge of the domain: how well sampled are the 5-6N cells?
+    # Southern edge of the region (5-6°N): how well sampled are these cells?
     south = cells[cells["lat0"] == LAT_RANGE[0]][["lon0", "lat0", "angle_change", "category",
                                                   "n_drifters_sw", "n_drifters_ne"]]
     print(f"\nSouthern-edge cells ({LAT_RANGE[0]:.0f}-{LAT_RANGE[0] + GRID:.0f}N), drogued only:")
     print(south.round(0).to_string(index=False))
     save_table(south, "reversal_southern_edge.csv")
 
-    # Map of the SW-to-NE direction change per cell, binned so the 90 deg threshold is the colour split.
-    # The headline numbers go in reversal_caption.txt (poster text), not in the title.
+    # Reversal map: direction change per cell, in four categories so that the
+    # 90° reversal threshold is the split between blue (not reversed) and red
+    # (reversed). The headline numbers are written to reversal_caption.txt
+    # rather than the figure title. Ocean cells without data in both seasons are
+    # hatched; land is painted white underneath so the hatching stops at the coast.
     norm, cmap = BoundaryNorm(ANGLE_BINS, len(ANGLE_COLORS)), ListedColormap(ANGLE_COLORS)
     fig, ax = plt.subplots(figsize=(10, 8), constrained_layout=True)
     no_data_style = dict(facecolor="lightgrey", edgecolor="grey", hatch="//", alpha=0.6, linewidth=0)
     ax.add_patch(plt.Rectangle((LON_RANGE[0], LAT_RANGE[0]), np.ptp(LON_RANGE), np.ptp(LAT_RANGE),
                                **no_data_style, zorder=-1))
-    if _get_land():   # opaque white land under the data cells, so the hatching stops at the coast
+    if _get_land():
         ax.add_collection(PolyCollection(_get_land(), facecolors="white", edgecolors="none",
                                          zorder=-0.5), autolim=False)
     draw_cells(ax, cells, cells["angle_change"], cmap, norm)
@@ -642,8 +798,12 @@ def reversal_analysis(per_dr, per_all, grid_dr, grid_all):
 
 
 def reversal_caption(rows):
-    """Poster caption text. If directions were random, 50% of cells would change by
-    > 90 deg and 25% by > 135 deg, so a CI that includes those levels is flagged."""
+    """Plain-language caption for the reversal map.
+
+    For reference: if current directions in the two seasons were unrelated, about
+    50% of cells would change by more than 90° and 25% by more than 135° purely
+    by chance. Where the confidence interval reaches down to these levels, the
+    caption says the result is not clearly different from chance."""
     lines = []
     for _, r in rows.iterrows():
         def part(pct, med, lo, hi, chance):
@@ -656,6 +816,9 @@ def reversal_caption(rows):
 
 
 def drogue_sensitivity(grid_all, grid_dr):
+    """Robustness check: how much do the mean currents change when undrogued
+    drifters are included? Compares speed and direction cell by cell, and checks
+    whether the differences are larger where few drifters are available."""
     section("DROGUE SENSITIVITY: all data vs drogued only, cells sufficient in both")
     cols = CELL + ["ve", "vn", "speed", "n_drifters"]
     m = (grid_all[grid_all["sufficient"]][cols + ["lon", "lat"]]
@@ -679,6 +842,7 @@ def drogue_sensitivity(grid_all, grid_dr):
            .agg(["count", "median", "mean", "max"]).round(3))
     save_table(m, "drogue_sensitivity_cells.csv")
 
+    # Differences against the number of drogued drifters in the cell
     fig, axes = plt.subplots(2, 2, figsize=(13, 10), sharex=True, constrained_layout=True)
     for row, season in enumerate(SEASONS):
         d = m[m["monsoon"] == season]
@@ -691,6 +855,7 @@ def drogue_sensitivity(grid_all, grid_dr):
     fig.suptitle("All data vs drogued only, against drogued sample size", fontsize=15)
     save_fig(fig, "10_drogue_sensitivity_scatter.png")
 
+    # Maps of where the differences are (green = small, red = large)
     fig, axes = plt.subplots(2, 2, figsize=(16, 14), constrained_layout=True)
     panels = [("pct_speed_diff", Normalize(0, 50), "% speed difference"),
               ("angle_diff", Normalize(0, 90), "Direction difference (deg)")]
@@ -706,6 +871,9 @@ def drogue_sensitivity(grid_all, grid_dr):
 
 
 def sst_analysis(drogued):
+    """Gridded mean sea surface temperature for each monsoon, built the same way
+    as the currents (drifter-weighted, same mapping rules), after removing SST
+    readings with a reported error above ERR_SST_MAX."""
     section("SEA SURFACE TEMPERATURE (drogued only)")
     err = drogued["err_sst"].dropna()
     print(err.describe(percentiles=[0.5, 0.9, 0.95, 0.99]).round(3))
@@ -730,6 +898,7 @@ def sst_analysis(drogued):
 
 
 def run():
+    """Run the full analysis from start to finish."""
     section("LOAD")
     ds = load_subset()
     print(f"Observations: {ds.sizes['obs']}, drifters: {ds.sizes['traj']}")
@@ -741,8 +910,8 @@ def run():
 
     section("CLEANING")
     obs, exclusions = clean_obs(build_obs_table(ds))
-    season_obs = obs[obs["monsoon"].isin(SEASONS)]
-    drogued = season_obs[season_obs["drogue"]]
+    season_obs = obs[obs["monsoon"].isin(SEASONS)]     # Southwest and Northeast months only
+    drogued = season_obs[season_obs["drogue"]]         # main analysis data set
     exclusions = pd.concat([exclusions, pd.DataFrame([
         {"step": "inter-monsoon months (analysis only)", "removed": len(obs) - len(season_obs),
          "remaining": len(season_obs)},
@@ -755,6 +924,7 @@ def run():
 
     explore(ds, obs)
 
+    # Per-drifter cell means: drogued only (main) and all drifters (robustness check)
     per_dr = per_drifter_means(drogued)
     per_all = per_drifter_means(season_obs)
     threshold_sensitivity(per_dr)
@@ -773,7 +943,7 @@ def run():
     drogue_sensitivity(grid_all, grid_dr)
     sst_grid = sst_analysis(drogued)
 
-    # Headline numbers
+    # Headline numbers, written to summary.txt
     kept = grid_dr[grid_dr["sufficient"]]
     lines = [
         "HEADLINE NUMBERS",
@@ -807,6 +977,8 @@ def run():
 
 
 def main():
+    """Create the output folders and run the analysis, saving everything printed
+    to outputs/report.txt."""
     os.makedirs(FIG_DIR, exist_ok=True)
     os.makedirs(TAB_DIR, exist_ok=True)
     with open(os.path.join(OUT_DIR, "report.txt"), "w", encoding="utf-8") as log:
