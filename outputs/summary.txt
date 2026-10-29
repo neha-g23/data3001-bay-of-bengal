@@ -1,0 +1,15 @@
+HEADLINE NUMBERS
+Rule: drogued only, 1 deg cells, >= 3 drifters each with >= 12 hourly obs, drifter-weighted mean, 500 whole-drifter bootstrap
+
+Observations after cleaning: 866505 (388 drifters), 2000-07 to 2022-06
+SW + NE observations: 535152; drogued: 336500 (62.9%)
+
+Mapped cells (drogued):
+  Southwest: 201 cells (94 high confidence), SST cells: 198
+  Northeast: 179 cells (10 high confidence), SST cells: 175
+
+SW vs NE reversal (> 90 deg):
+  [drogued only] Whole Bay of Bengal: 66.9% of 151 cells (bootstrap median 64.5%, 95% CI 55.0-74.1%); > 135 deg: 33.1% (median 34.2%, 95% CI 25.8-44.1%)
+  [drogued only] Approx. EICC band 80-85E: 61.5% of 39 cells (bootstrap median 60.0%, 95% CI 41.5-74.1%); > 135 deg: 25.6% (median 33.3%, 95% CI 18.0-47.9%)
+  [all data] Whole Bay of Bengal: 70.3% of 209 cells (bootstrap median 70.6%, 95% CI 64.0-76.5%); > 135 deg: 45.9% (median 41.5%, 95% CI 35.0-50.0%)
+  [all data] Approx. EICC band 80-85E: 65.2% of 46 cells (bootstrap median 64.1%, 95% CI 52.3-78.0%); > 135 deg: 34.8% (median 35.0%, 95% CI 23.4-48.6%)
