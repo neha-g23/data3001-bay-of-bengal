@@ -308,14 +308,14 @@ def load_subset():
     region, and saves a local copy for future runs."""
     if os.path.exists(CACHE_PATH):
         print(f"Loading cached subset: {CACHE_PATH}")
-        return xr.open_dataset(CACHE_PATH)
+        return xr.open_dataset(CACHE_PATH, engine="h5netcdf")
 
     import clouddrift as cd
     from clouddrift.ragged import subset
     print("Computing subset from gdp1h() (this takes a few minutes)...")
     ds = subset(cd.datasets.gdp1h(), {"lat": LAT_RANGE, "lon": LON_RANGE}, row_dim_name="traj")
     ds.load()
-    ds.to_netcdf(CACHE_PATH)
+    ds.to_netcdf(CACHE_PATH, engine="h5netcdf")
     print("Saved subset to disk.")
     return ds
 
@@ -897,6 +897,647 @@ def sst_analysis(drogued):
     return grid
 
 
+# ============================================================
+# SPATIAL GAUSSIAN KERNEL SMOOTHING — DATA3001
+# ============================================================
+# Supplementary analysis of drogued surface currents.
+# Original gridded estimates and reversal statistics are retained.
+
+KERNEL_BANDWIDTHS_KM = (
+    25.0, 40.0, 50.0, 60.0, 75.0, 90.0,
+    100.0, 125.0, 175.0, 250.0, 350.0
+)
+KERNEL_TEST_FRACTION = 0.20
+KERNEL_RADIUS_MULTIPLIER = 3.0
+
+
+def kernel_distance_km(lon_a, lat_a, lon_b, lat_b):
+    """Pairwise great-circle distances in kilometres."""
+    a_lon = np.radians(np.asarray(lon_a, dtype=float))[:, None]
+    a_lat = np.radians(np.asarray(lat_a, dtype=float))[:, None]
+    b_lon = np.radians(np.asarray(lon_b, dtype=float))[None, :]
+    b_lat = np.radians(np.asarray(lat_b, dtype=float))[None, :]
+
+    hav = np.sin((a_lat - b_lat) / 2) ** 2 + (
+        np.cos(a_lat) * np.cos(b_lat)
+        * np.sin((a_lon - b_lon) / 2) ** 2
+    )
+    return 6371.0 * 2 * np.arcsin(np.sqrt(np.clip(hav, 0.0, 1.0)))
+
+
+def kernel_predict(targets, reference, h_km):
+    """Gaussian smoothing of drifter-weighted cell velocity components.
+
+    Only qualifying reference cells are supplied. The result has
+    one pair of smoothed eastward/northward velocities per target.
+    """
+    pred = np.full((len(targets), 2), np.nan, dtype=float)
+
+    if len(targets) == 0 or len(reference) == 0:
+        return pred
+    if h_km <= 0:
+        raise ValueError("Bandwidth must be positive")
+
+    distance = kernel_distance_km(
+        targets["lon"], targets["lat"],
+        reference["lon"], reference["lat"]
+    )
+
+    weights = np.exp(-0.5 * (distance / h_km) ** 2)
+    weights[distance > KERNEL_RADIUS_MULTIPLIER * h_km] = 0.0
+
+    denominator = weights.sum(axis=1)
+    valid = denominator > 0
+
+    if valid.any():
+        values = reference[["ve", "vn"]].to_numpy(dtype=float)
+        pred[valid] = (
+            weights[valid] @ values
+        ) / denominator[valid, None]
+
+    return pred
+
+
+def kernel_evaluate(heldout_per, reference_per, bandwidths,
+                    leave_one_out=False):
+    """Evaluate original and smoothed estimates on identical held-out cells.
+
+    When leave_one_out=True, all records from the evaluated drifter
+    are removed before constructing the reference grid.
+    """
+    candidates = (0.0,) + tuple(bandwidths)
+    records = []
+
+    groups = heldout_per[
+        heldout_per["n_obs"] >= MIN_OBS_PER_DRIFTER
+    ].groupby(["monsoon", "drifter_id"], sort=True)
+
+    cached = {}
+
+    for (season, drifter_id), actual in groups:
+
+        if leave_one_out:
+            training = reference_per[
+                (reference_per["monsoon"] == season)
+                & (reference_per["drifter_id"] != drifter_id)
+            ]
+            reference_grid = velocity_grid(training)
+
+        else:
+            if season not in cached:
+                training = reference_per[
+                    reference_per["monsoon"] == season
+                ]
+                cached[season] = velocity_grid(training)
+
+            reference_grid = cached[season]
+
+        eligible = reference_grid[
+            reference_grid["sufficient"]
+        ][["lon0", "lat0", "lon", "lat", "ve", "vn"]]
+
+        if eligible.empty:
+            continue
+
+        paired = actual.merge(
+            eligible[["lon0", "lat0", "ve", "vn"]],
+            on=["lon0", "lat0"],
+            how="inner",
+            suffixes=("_true", "_raw")
+        )
+
+        if paired.empty:
+            continue
+
+        truth = paired[
+            ["ve_true", "vn_true"]
+        ].to_numpy(dtype=float)
+
+        baseline = paired[
+            ["ve_raw", "vn_raw"]
+        ].to_numpy(dtype=float)
+
+        targets = pd.DataFrame({
+            "lon": paired["lon0"] + GRID / 2,
+            "lat": paired["lat0"] + GRID / 2
+        })
+
+        for h in candidates:
+            estimate = (
+                baseline if h == 0
+                else kernel_predict(targets, eligible, h)
+            )
+
+            if not np.isfinite(estimate).all():
+                raise AssertionError(
+                    f"Missing prediction at valid cell, bandwidth={h}"
+                )
+
+            squared_error = ((truth - estimate) ** 2).sum(axis=1)
+
+            records.append({
+                "monsoon": season,
+                "drifter_id": drifter_id,
+                "bandwidth_km": h,
+                "n_cells": len(paired),
+                "mean_sq_vector_error": float(squared_error.mean())
+            })
+
+    return pd.DataFrame(
+        records,
+        columns=[
+            "monsoon", "drifter_id", "bandwidth_km",
+            "n_cells", "mean_sq_vector_error"
+        ]
+    )
+
+
+def kernel_score_table(prediction_errors):
+    """Compute drifter-grouped vector RMSE in m/s."""
+    rows = []
+
+    for scope in SEASONS + ["Overall"]:
+        if scope == "Overall":
+            part = prediction_errors
+        else:
+            part = prediction_errors[
+                prediction_errors["monsoon"] == scope
+            ]
+
+        for h, records in part.groupby("bandwidth_km"):
+            rmse = np.sqrt(
+                records["mean_sq_vector_error"].mean()
+            )
+
+            rows.append({
+                "scope": scope,
+                "bandwidth_km": float(h),
+                "rmse_vector_mps": float(rmse),
+                "n_drifters": int(
+                    records["drifter_id"].nunique()
+                ),
+                "n_drifter_seasons": len(records),
+                "n_heldout_cell_means": int(
+                    records["n_cells"].sum()
+                )
+            })
+
+    return pd.DataFrame(rows)
+
+
+def kernel_smoothing_analysis(per_dr, grid_dr):
+    """Run spatial kernel smoothing, validation and visualisation."""
+    section("SPATIAL KERNEL SMOOTHING — DROGUED ONLY")
+
+    drifter_ids = np.sort(per_dr["drifter_id"].unique())
+
+    if len(drifter_ids) < 10:
+        print("Too few drifters for kernel validation.")
+        return
+
+    rng = np.random.default_rng(SEED)
+    shuffled = rng.permutation(drifter_ids)
+
+    n_test = max(
+        1, round(len(shuffled) * KERNEL_TEST_FRACTION)
+    )
+
+    test_ids = shuffled[:n_test]
+    train_ids = shuffled[n_test:]
+
+    train = per_dr[
+        per_dr["drifter_id"].isin(train_ids)
+    ].copy()
+
+    test = per_dr[
+        per_dr["drifter_id"].isin(test_ids)
+    ].copy()
+
+    assert set(train["drifter_id"]).isdisjoint(
+        set(test["drifter_id"])
+    )
+
+    print(
+        f"Drifters: {len(drifter_ids)} total, "
+        f"{len(train_ids)} training, {len(test_ids)} testing"
+    )
+
+    # --------------------------------------------------------
+    # 1. SELECT BANDWIDTH USING TRAINING DRIFTERS
+    # --------------------------------------------------------
+    print("\nRunning leave-one-drifter-out cross-validation...")
+
+    cv_errors = kernel_evaluate(
+        train, train, KERNEL_BANDWIDTHS_KM,
+        leave_one_out=True
+    )
+
+    if cv_errors.empty:
+        print("Insufficient coverage for cross-validation.")
+        return
+
+    cv_scores = kernel_score_table(cv_errors)
+    save_table(cv_scores, "kernel_bandwidth_cv.csv")
+
+    overall = cv_scores[
+        (cv_scores["scope"] == "Overall")
+        & (cv_scores["bandwidth_km"] > 0)
+    ].sort_values(["rmse_vector_mps", "bandwidth_km"])
+
+    h_best = float(overall.iloc[0]["bandwidth_km"])
+
+    print("\nTRAINING CROSS-VALIDATION:")
+    print(cv_scores.round(4).to_string(index=False))
+    print(f"\nSelected bandwidth: {h_best:g} km")
+
+    # --------------------------------------------------------
+    # 2. INDEPENDENT HELD-OUT DRIFTER TEST
+    # --------------------------------------------------------
+    test_errors = kernel_evaluate(
+        test, train, (h_best,),
+        leave_one_out=False
+    )
+
+    if test_errors.empty:
+        test_scores = pd.DataFrame()
+        print("No comparable held-out test cells.")
+    else:
+        test_scores = kernel_score_table(test_errors)
+
+        print("\nINDEPENDENT HELD-OUT TEST:")
+        print(test_scores.round(4).to_string(index=False))
+
+        for scope in SEASONS + ["Overall"]:
+            s = test_scores[test_scores["scope"] == scope]
+
+            if len(s) == 2:
+                raw = float(s.loc[
+                    s["bandwidth_km"] == 0,
+                    "rmse_vector_mps"
+                ].iloc[0])
+
+                smooth = float(s.loc[
+                    s["bandwidth_km"] == h_best,
+                    "rmse_vector_mps"
+                ].iloc[0])
+
+                improvement = (
+                    100 * (raw - smooth) / raw
+                    if raw > 0 else np.nan
+                )
+
+                print(
+                    f"{scope}: original={raw:.4f}, "
+                    f"smoothed={smooth:.4f} m/s, "
+                    f"improvement={improvement:+.1f}%"
+                )
+
+    save_table(test_scores, "kernel_heldout_test.csv")
+
+
+    # --------------------------------------------------------
+    # DRIFTER-LEVEL BOOTSTRAP: HELD-OUT RMSE IMPROVEMENT
+    # --------------------------------------------------------
+    if not test_errors.empty:
+        save_table(
+            test_errors,
+            "kernel_heldout_drifter_errors.csv"
+        )
+
+        paired = test_errors.pivot(
+            index=["drifter_id", "monsoon"],
+            columns="bandwidth_km",
+            values="mean_sq_vector_error"
+        )[[0.0, h_best]].dropna()
+
+        # Resample whole drifters, retaining both seasonal records.
+        grouped = paired.groupby(level="drifter_id")
+        group_sum = grouped.sum().to_numpy()
+        group_n = grouped.size().to_numpy()
+
+        rng_boot = np.random.default_rng(3001)
+        n_boot_kernel = 5000
+
+        indices = rng_boot.integers(
+            0, len(group_sum),
+            size=(n_boot_kernel, len(group_sum))
+        )
+
+        boot_mse = (
+            group_sum[indices].sum(axis=1)
+            / group_n[indices].sum(axis=1)[:, None]
+        )
+
+        raw_rmse = np.sqrt(boot_mse[:, 0])
+        smooth_rmse = np.sqrt(boot_mse[:, 1])
+
+        improvement = 100 * (
+            raw_rmse - smooth_rmse
+        ) / raw_rmse
+
+        ci_low, ci_high = np.percentile(
+            improvement, [2.5, 97.5]
+        )
+
+        positive_pct = 100 * np.mean(improvement > 0)
+
+        overall_scores = test_scores[
+            test_scores["scope"] == "Overall"
+        ].set_index("bandwidth_km")
+
+        raw_point = float(
+            overall_scores.loc[0.0, "rmse_vector_mps"]
+        )
+        smooth_point = float(
+            overall_scores.loc[h_best, "rmse_vector_mps"]
+        )
+
+        point_improvement = (
+            100 * (raw_point - smooth_point) / raw_point
+        )
+
+        bootstrap_summary = pd.DataFrame([{
+            "bandwidth_km": h_best,
+            "n_test_drifters": len(group_sum),
+            "n_bootstrap": n_boot_kernel,
+            "observed_improvement_pct": point_improvement,
+            "bootstrap_mean_improvement_pct": improvement.mean(),
+            "ci95_low_pct": ci_low,
+            "ci95_high_pct": ci_high,
+            "bootstrap_positive_pct": positive_pct
+        }])
+
+        save_table(
+            bootstrap_summary,
+            "kernel_heldout_bootstrap.csv"
+        )
+
+        print("\nKERNEL BOOTSTRAP ROBUSTNESS:")
+        print(bootstrap_summary.round(3).to_string(index=False))
+
+
+    # --------------------------------------------------------
+    # 3. FIT FINAL SMOOTHED MAP USING ALL DRIFTERS
+    # --------------------------------------------------------
+    smoothed = grid_dr.copy()
+
+    kernel_columns = [
+        "kernel_ve", "kernel_vn", "kernel_speed",
+        "kernel_direction_deg", "kernel_vector_change_mps",
+        "kernel_direction_change_deg"
+    ]
+
+    for col in kernel_columns:
+        smoothed[col] = np.nan
+
+    for season in SEASONS:
+        indices = smoothed.index[
+            (smoothed["monsoon"] == season)
+            & smoothed["sufficient"]
+        ]
+
+        source = smoothed.loc[indices]
+        pred = kernel_predict(source, source, h_best)
+
+        smoothed.loc[indices, "kernel_ve"] = pred[:, 0]
+        smoothed.loc[indices, "kernel_vn"] = pred[:, 1]
+
+        smoothed.loc[indices, "kernel_speed"] = np.hypot(
+            pred[:, 0], pred[:, 1]
+        )
+
+        smoothed.loc[
+            indices, "kernel_direction_deg"
+        ] = np.degrees(np.arctan2(pred[:, 1], pred[:, 0]))
+
+        smoothed.loc[
+            indices, "kernel_vector_change_mps"
+        ] = np.hypot(
+            source["ve"].to_numpy() - pred[:, 0],
+            source["vn"].to_numpy() - pred[:, 1]
+        )
+
+        smoothed.loc[
+            indices, "kernel_direction_change_deg"
+        ] = angle_between(
+            source["ve"], source["vn"],
+            pred[:, 0], pred[:, 1]
+        )
+
+    # Original coverage mask must remain unchanged.
+    assert smoothed.loc[
+        ~smoothed["sufficient"], "kernel_ve"
+    ].isna().all()
+
+    assert int(smoothed["kernel_ve"].notna().sum()) == int(
+        smoothed["sufficient"].sum()
+    )
+
+    save_table(
+        smoothed,
+        "kernel_smoothed_grid_drogued.csv"
+    )
+
+    # --------------------------------------------------------
+    # 4. FIGURE — ORIGINAL VS SMOOTHED
+    # --------------------------------------------------------
+    fig, axes = plt.subplots(
+        2, 2, figsize=(17, 13),
+        constrained_layout=True
+    )
+
+    max_speed = max(
+        float(smoothed["speed"].max()),
+        float(smoothed["kernel_speed"].max())
+    )
+
+    norm = Normalize(0, max_speed)
+    cmap = plt.get_cmap("YlGnBu")
+
+    for row, season in enumerate(SEASONS):
+        raw = smoothed[
+            smoothed["monsoon"] == season
+        ]
+
+        season_cell_map(
+            axes[row, 0], raw,
+            "speed", cmap, norm,
+            f"{season}: original drifter-weighted",
+            arrows=True
+        )
+
+        new = raw.copy()
+        new["ve"] = new["kernel_ve"]
+        new["vn"] = new["kernel_vn"]
+        new["speed"] = new["kernel_speed"]
+
+        season_cell_map(
+            axes[row, 1], new,
+            "speed", cmap, norm,
+            f"{season}: Gaussian kernel (h={h_best:g} km)",
+            arrows=True
+        )
+
+    add_land_legend(
+        axes[0, 0], [INSUFFICIENT_PATCH]
+    )
+
+    add_colorbar(
+        fig, axes, cmap, norm,
+        "Mean vector speed (m/s)"
+    )
+
+    fig.suptitle(
+        "Original vs kernel-smoothed circulation (drogued only)",
+        fontsize=15
+    )
+
+    save_fig(fig, "13_kernel_raw_vs_smoothed.png", dpi=250)
+
+    # --------------------------------------------------------
+    # 5. FIGURE — BANDWIDTH CROSS-VALIDATION
+    # --------------------------------------------------------
+    fig, ax = plt.subplots(
+        figsize=(9, 6), constrained_layout=True
+    )
+
+    for season, marker in [
+        ("Southwest", "o"),
+        ("Northeast", "s"),
+        ("Overall", "^")
+    ]:
+        s = cv_scores[
+            cv_scores["scope"] == season
+        ].sort_values("bandwidth_km")
+
+        if not s.empty:
+            ax.plot(
+                s["bandwidth_km"],
+                s["rmse_vector_mps"],
+                marker=marker,
+                label=season
+            )
+
+    ax.axvline(
+        h_best,
+        color="grey",
+        linestyle="--",
+        label=f"Selected h = {h_best:g} km"
+    )
+
+    ax.set(
+        xlabel="Bandwidth h (km); 0 = original grid",
+        ylabel="Drifter-grouped vector RMSE (m/s)",
+        title="Training cross-validation for bandwidth selection"
+    )
+
+    ax.legend()
+    ax.grid(alpha=0.2)
+
+    save_fig(fig, "14_kernel_bandwidth_cv.png")
+
+    # --------------------------------------------------------
+    # 6. FIGURE — MAGNITUDE OF SMOOTHING DIFFERENCES
+    # --------------------------------------------------------
+    fig, axes = plt.subplots(
+        1, 2, figsize=(16, 7),
+        constrained_layout=True
+    )
+
+    max_diff = float(
+        smoothed["kernel_vector_change_mps"].max()
+    )
+
+    norm_diff = Normalize(0, max(max_diff, 1e-8))
+    diff_cmap = plt.get_cmap("Oranges")
+
+    for ax, season in zip(axes, SEASONS):
+        g = smoothed[
+            smoothed["monsoon"] == season
+        ]
+
+        season_cell_map(
+            ax, g,
+            "kernel_vector_change_mps",
+            diff_cmap, norm_diff,
+            f"{season}: magnitude of smoothing change"
+        )
+
+    add_land_legend(axes[0], [INSUFFICIENT_PATCH])
+
+    add_colorbar(
+        fig, axes, diff_cmap, norm_diff,
+        "Vector change (m/s)"
+    )
+
+    save_fig(fig, "15_kernel_difference.png")
+
+    # --------------------------------------------------------
+    # 7. WRITE INTERPRETATION SUMMARY
+    # --------------------------------------------------------
+    summary_path = os.path.join(
+        OUT_DIR, "kernel_summary.txt"
+    )
+
+    with open(
+        summary_path, "w", encoding="utf-8"
+    ) as f:
+        f.write("SPATIAL GAUSSIAN KERNEL SMOOTHING\n")
+        f.write("Main climatology results unchanged.\n")
+        f.write(
+            "Only originally sufficient grid cells are smoothed.\n"
+        )
+        f.write(f"Selected bandwidth: {h_best:g} km\n")
+        f.write(
+            f"Training drifters: {len(train_ids)}\n"
+        )
+        f.write(
+            f"Test drifters: {len(test_ids)}\n"
+        )
+
+        if not test_scores.empty:
+            s = test_scores[
+                test_scores["scope"] == "Overall"
+            ]
+
+            raw = float(s.loc[
+                s["bandwidth_km"] == 0,
+                "rmse_vector_mps"
+            ].iloc[0])
+
+            smooth = float(s.loc[
+                s["bandwidth_km"] == h_best,
+                "rmse_vector_mps"
+            ].iloc[0])
+
+            f.write(
+                f"Original held-out RMSE: {raw:.5f} m/s\n"
+            )
+            f.write(
+                f"Smoothed held-out RMSE: {smooth:.5f} m/s\n"
+            )
+
+            if raw > 0:
+                f.write(
+                    f"Improvement: {100 * (raw - smooth) / raw:+.2f}%\n"
+                )
+        else:
+            f.write(
+                "Insufficient independent test coverage.\n"
+            )
+
+        f.write(
+            "Limitation: geographical smoothing does not "
+            "account for land barriers or sharp ocean fronts.\n"
+        )
+        f.write(
+            "Original bootstrap uncertainty does not describe "
+            "the smoothed estimator.\n"
+        )
+
+    print("  -> kernel_summary.txt")
+
+
 def run():
     """Run the full analysis from start to finish."""
     section("LOAD")
@@ -937,6 +1578,9 @@ def run():
         print(pd.crosstab(g["monsoon"], g["confidence"]))
     save_table(grid_dr, "climatology_grid_drogued.csv")
     save_table(grid_all, "climatology_grid_all.csv")
+
+    # Kernel smoothing extension
+    kernel_smoothing_analysis(per_dr, grid_dr) 
 
     circulation_figures(grid_dr, grid_all)
     reversal = reversal_analysis(per_dr, per_all, grid_dr, grid_all)
