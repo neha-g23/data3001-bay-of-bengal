@@ -1,0 +1,8 @@
+# Python virtual environments (each person creates their own; see README)
+.venv/
+.venv313/
+__pycache__/
+
+# Bay of Bengal data subset (~70 MB). Created automatically on the first run,
+# or share a copy through a drive link.
+bob_subset.nc

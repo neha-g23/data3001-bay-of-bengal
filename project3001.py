@@ -32,13 +32,17 @@ Method in brief
    than 90° between monsoons, for the whole Bay and for the western Bay
    (80-85°E, an approximate East India Coastal Current band), with 95%
    confidence intervals.
+7. As an alternative to the fixed seasons, build a map for every calendar
+   month in which observations from neighbouring months count with smoothly
+   decreasing weight. The amount of smoothing is chosen by cross-validation
+   and compared with the fixed seasons.
 
 How to run
 ----------
     .venv313\Scripts\python.exe project3001.py
 
 The first run downloads and subsets the global dataset (a few minutes) and
-caches it to `bob_subset.nc`. Later runs take about 20 seconds.
+caches it to `bob_subset.nc`. Later runs take about a minute.
 
 Outputs (written to `outputs/`)
 -------------------------------
@@ -95,6 +99,10 @@ SEED = 0                         # random seed, so results are reproducible
 # --- East India Coastal Current (EICC) band ---
 EICC_LON = (80.0, 85.0)          # western Bay longitude band used as an approximate EICC region
                                  # (a simple longitude band, not a coastline-following mask)
+
+# --- Smooth temporal weighting (alternative to the fixed seasons above) ---
+TEMPORAL_SIGMAS = (0.0, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)   # widths of the Gaussian month weighting
+                                                          # to test, in months; 0 = target month only
 
 # --- Threshold sensitivity test: combinations of mapping rules to compare ---
 SENS_MIN_DRIFTERS = [1, 3, 5, 10]
@@ -1538,6 +1546,268 @@ def kernel_smoothing_analysis(per_dr, grid_dr):
     print("  -> kernel_summary.txt")
 
 
+# ============================================================
+# Smooth temporal weighting (alternative to fixed seasons)
+# ============================================================
+# The main analysis uses fixed seasons: an observation in September counts
+# fully towards the Southwest monsoon and one in October not at all. Here each
+# calendar month gets its own map instead. Observations from every month are
+# used, weighted by how close their month is to the month being mapped: the
+# weight falls off as a Gaussian of the gap in months, measured around the
+# calendar so that December sits next to January. Observations from all years
+# are pooled, as in the main analysis.
+#
+# Drifters still count equally. Each drifter's observations in a cell are
+# averaged using the month weights, and the drifter then contributes with the
+# weight of its closest month, so a drifter seen in the target month counts
+# fully and one seen only two months away counts much less. A cell is mapped
+# when these weights add up to at least MIN_DRIFTERS, which is the same rule as
+# the main analysis when only the target month is used.
+#
+# The width of the Gaussian (sigma) is chosen by leave-one-drifter-out
+# cross-validation, and the result is compared with the fixed seasons on the
+# same test cases.
+
+MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+FIXED_SEASONS = "fixed seasons (main analysis)"
+TEMPORAL_KEY = ["target_month", "lon0", "lat0"]
+
+
+def temporal_label(sigma):
+    """Readable name for one temporal weighting width."""
+    return "target month only" if sigma == 0 else f"Gaussian, sigma = {sigma:g} months"
+
+
+def temporal_weights(sigma):
+    """12 x 12 weight table: row = month being mapped, column = month the
+    observation was made in. sigma = 0 uses the target month only."""
+    months = np.arange(12)
+    gap = np.abs(months[:, None] - months[None, :])
+    gap = np.minimum(gap, 12 - gap)             # distance around the calendar
+    if sigma == 0:
+        return (gap == 0).astype(float)
+    return np.exp(-0.5 * (gap / sigma) ** 2)
+
+
+def fixed_season_weights():
+    """The same table for the main analysis's fixed seasons: weight 1 for every
+    month in the same monsoon as the target month and 0 otherwise. Rows for
+    inter-monsoon months are all zero (those months are not mapped)."""
+    season = [SEASON_OF_MONTH.get(m) for m in range(1, 13)]
+    return np.array([[float(a is not None and a == b) for b in season] for a in season])
+
+
+def monthly_drifter_means(obs):
+    """Mean velocity of every drifter in every cell in each calendar month,
+    keeping drifters with at least MIN_OBS_PER_DRIFTER hourly observations
+    there. Every weighting scheme is built from these same records, so the
+    comparison between schemes is like-for-like."""
+    rec = (obs.groupby(["month", "lon0", "lat0", "drifter_id"])
+              .agg(ve=("ve", "mean"), vn=("vn", "mean"), n_obs=("ve", "count"))
+              .reset_index())
+    return rec[rec["n_obs"] >= MIN_OBS_PER_DRIFTER].reset_index(drop=True)
+
+
+def temporal_estimates(rec, weights):
+    """Temporally weighted, drifter-weighted cell means for every calendar month.
+
+    Returns one row per target month, cell and contributing drifter, holding
+    the drifter's weight, the cell estimate from all drifters, and the cell
+    estimate with that drifter left out (used for cross-validation)."""
+    parts = []
+    for target in range(1, 13):
+        w = weights[target - 1, rec["month"].to_numpy() - 1]
+        r = rec[w > 0].assign(w=w[w > 0])
+        if r.empty:
+            continue
+        r = r.assign(wve=r["w"] * r["ve"], wvn=r["w"] * r["vn"])
+        d = (r.groupby(["lon0", "lat0", "drifter_id"])
+              .agg(sum_w=("w", "sum"), wve=("wve", "sum"), wvn=("wvn", "sum"), weight=("w", "max"))
+              .reset_index())
+        d["target_month"] = target
+        parts.append(d)
+    d = pd.concat(parts, ignore_index=True)
+
+    # Each drifter's month-weighted mean, then the weighted average over drifters
+    d["ve_d"] = d["wve"] / d["sum_w"]
+    d["vn_d"] = d["wvn"] / d["sum_w"]
+    d["w_ve"] = d["weight"] * d["ve_d"]
+    d["w_vn"] = d["weight"] * d["vn_d"]
+    d["in_month"] = d["weight"] == 1.0          # drifter was observed in the target month itself
+    cell = d.groupby(TEMPORAL_KEY)
+    total_w = cell["weight"].transform("sum")
+    sum_ve = cell["w_ve"].transform("sum")
+    sum_vn = cell["w_vn"].transform("sum")
+    d["ve"] = sum_ve / total_w
+    d["vn"] = sum_vn / total_w
+    d["weighted_drifters"] = total_w
+    d["drifters_in_month"] = cell["in_month"].transform("sum")
+
+    # The same estimate with this drifter removed
+    rest_w = total_w - d["weight"]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        d["ve_loo"] = np.where(rest_w > 1e-12, (sum_ve - d["w_ve"]) / rest_w, np.nan)
+        d["vn_loo"] = np.where(rest_w > 1e-12, (sum_vn - d["w_vn"]) / rest_w, np.nan)
+    d["weight_loo"] = rest_w
+    return d
+
+
+def temporal_grid(est):
+    """One row per month and cell from temporal_estimates, in the same layout as
+    the seasonal grids so the existing map functions can draw it."""
+    g = est.drop_duplicates(TEMPORAL_KEY)[
+        TEMPORAL_KEY + ["ve", "vn", "weighted_drifters", "drifters_in_month"]
+    ].rename(columns={"target_month": "month"}).reset_index(drop=True)
+    g["speed"] = np.hypot(g["ve"], g["vn"])
+    g["direction_deg"] = np.degrees(np.arctan2(g["vn"], g["ve"]))
+    g["sufficient"] = g["weighted_drifters"] >= MIN_DRIFTERS
+    g["lon"] = g["lon0"] + GRID / 2
+    g["lat"] = g["lat0"] + GRID / 2
+    return g.sort_values(["month", "lon0", "lat0"], ignore_index=True)
+
+
+def temporal_cv(rec, schemes):
+    """Leave-one-drifter-out test of each weighting scheme. For every drifter,
+    month and cell where it was observed, the drifter is removed, the cell is
+    estimated from the remaining drifters, and the estimate is compared with the
+    drifter's own mean velocity there. Returns the squared vector error of each
+    scheme per test case (NaN where the scheme cannot map the cell)."""
+    truth = rec.rename(columns={"month": "target_month", "ve": "ve_true", "vn": "vn_true"})
+    key = TEMPORAL_KEY + ["drifter_id"]
+    errors = truth[key].copy()
+    for label, weights in schemes.items():
+        est = temporal_estimates(rec, weights)
+        m = truth.merge(est[key + ["ve_loo", "vn_loo", "weight_loo"]], on=key, how="left")
+        sq = (m["ve_true"] - m["ve_loo"]) ** 2 + (m["vn_true"] - m["vn_loo"]) ** 2
+        errors[label] = np.where(m["weight_loo"] >= MIN_DRIFTERS, sq, np.nan)
+    return errors
+
+
+def temporal_score_table(errors, labels, months, scope):
+    """RMSE of each scheme, using only test cases that every scheme in labels
+    can map, so all schemes are scored on exactly the same cases."""
+    sub = errors[errors["target_month"].isin(months)].dropna(subset=labels)
+    return pd.DataFrame([{
+        "scope": scope, "method": label,
+        "rmse_vector_mps": np.sqrt(sub[label].mean()),
+        "n_test_cases": len(sub), "n_drifters": sub["drifter_id"].nunique(),
+    } for label in labels])
+
+
+def bootstrap_improvement(errors, new, old, seed=SEED):
+    """95% confidence interval for the % reduction in RMSE of scheme `new`
+    relative to scheme `old`, resampling whole drifters."""
+    per = errors.dropna(subset=[new, old]).groupby("drifter_id")[[new, old]].sum()
+    new_sq, old_sq = per[new].to_numpy(), per[old].to_numpy()
+    rng = np.random.default_rng(seed)
+    draws = []
+    for _ in range(N_BOOT):
+        w = np.bincount(rng.integers(0, len(per), len(per)), minlength=len(per))
+        draws.append(100 * (1 - np.sqrt((w * new_sq).sum() / (w * old_sq).sum())))
+    return np.percentile(draws, [2.5, 97.5])
+
+
+def temporal_weighting_analysis(drogued_all):
+    """Monthly circulation maps using smooth temporal weighting, with the
+    weighting width chosen by cross-validation and tested against the fixed
+    seasons. Uses drogued observations from all twelve months."""
+    section("SMOOTH TEMPORAL WEIGHTING (drogued only, all months)")
+    rec = monthly_drifter_means(drogued_all)
+    print(f"Drifter-month-cell records: {len(rec)} from {rec['drifter_id'].nunique()} drifters")
+
+    # 1. Cross-validation of each weighting width, and of the fixed seasons
+    sigma_labels = [temporal_label(s) for s in TEMPORAL_SIGMAS]
+    schemes = {temporal_label(s): temporal_weights(s) for s in TEMPORAL_SIGMAS}
+    schemes[FIXED_SEASONS] = fixed_season_weights()
+    errors = temporal_cv(rec, schemes)
+    season_months = sorted(SEASON_OF_MONTH)
+    scores = pd.concat([
+        temporal_score_table(errors, sigma_labels, range(1, 13), "All months"),
+        temporal_score_table(errors, list(schemes), season_months, "SW + NE months"),
+    ], ignore_index=True)
+    print("\nLeave-one-drifter-out cross-validation (lower RMSE is better):")
+    print(scores.round(4).to_string(index=False))
+    save_table(scores, "temporal_weighting_cv.csv")
+
+    # Width with the lowest error over all twelve months
+    all_months = scores[scores["scope"] == "All months"].set_index("method")["rmse_vector_mps"]
+    best_sigma = min(TEMPORAL_SIGMAS, key=lambda s: all_months[temporal_label(s)])
+    best = temporal_label(best_sigma)
+    print(f"\nSelected weighting: {best}")
+
+    # Compare with the fixed seasons in the months both can map
+    in_seasons = scores[scores["scope"] == "SW + NE months"].set_index("method")["rmse_vector_mps"]
+    improvement = 100 * (1 - in_seasons[best] / in_seasons[FIXED_SEASONS])
+    ci = bootstrap_improvement(errors[errors["target_month"].isin(season_months)], best, FIXED_SEASONS)
+    print(f"SW + NE months: fixed seasons RMSE {in_seasons[FIXED_SEASONS]:.4f} m/s, "
+          f"{best} RMSE {in_seasons[best]:.4f} m/s, "
+          f"reduction {improvement:+.1f}% (95% CI {ci[0]:+.1f} to {ci[1]:+.1f}%)")
+    print("(The width is chosen on the same drifters it is tested on, so this "
+          "comparison is slightly optimistic for the temporal weighting.)")
+
+    # 2. Monthly climatology with the selected width
+    clim = temporal_grid(temporal_estimates(rec, temporal_weights(best_sigma)))
+    save_table(clim, "monthly_climatology_drogued.csv")
+    mapped = clim[clim["sufficient"]].groupby("month").size().reindex(range(1, 13), fill_value=0)
+    print("\nMapped cells per month: " +
+          ", ".join(f"{MONTH_NAMES[m - 1]} {n}" for m, n in mapped.items()))
+
+    # 3. Maps for all twelve months, on one shared speed scale
+    vmax = np.ceil(clim.loc[clim["sufficient"], "speed"].max() * 10) / 10
+    norm, cmap = Normalize(0, vmax), plt.get_cmap("YlGnBu")
+    fig, axes = plt.subplots(3, 4, figsize=(24, 17), constrained_layout=True)
+    for ax, month in zip(axes.flat, range(1, 13)):
+        season_cell_map(ax, clim[clim["month"] == month], "speed", cmap, norm,
+                        f"{MONTH_NAMES[month - 1]} ({SEASON_OF_MONTH.get(month, 'Inter-monsoon')})",
+                        arrows=True)
+    add_land_legend(axes[0, 0], [Patch(**INSUFFICIENT_STYLE,
+                                       label=f"Insufficient data (weighted drifters < {MIN_DRIFTERS})")],
+                    fontsize=8)
+    add_colorbar(fig, axes, cmap, norm, "Mean current speed (m/s)")
+    fig.suptitle(f"Monthly surface circulation with smooth temporal weighting "
+                 f"({best}, drogued drifters only)", fontsize=16)
+    save_fig(fig, "16_monthly_circulation.png")
+
+    # 4. Annual cycle of the northward current in the EICC band. Too few single
+    # cells are sampled in every month, so the whole band is treated as one
+    # region: the same weighting is applied to all drifter records in the band,
+    # giving one drifter-weighted mean per month.
+    band_rec = rec[in_eicc(rec["lon0"])].assign(lon0=EICC_LON[0], lat0=LAT_RANGE[0])
+
+    def band_cycle(weights):
+        g = temporal_grid(temporal_estimates(band_rec, weights)).set_index("month")
+        return g["vn"].where(g["sufficient"]), g["weighted_drifters"]
+
+    smooth_vn, smooth_n = band_cycle(temporal_weights(best_sigma))
+    fixed_vn, _ = band_cycle(fixed_season_weights())
+    cycle = pd.DataFrame({"smooth_vn": smooth_vn, "weighted_drifters": smooth_n,
+                          "fixed_vn": fixed_vn}).reindex(range(1, 13))
+    cycle.index.name = "month"
+    save_table(cycle, "eicc_monthly_cycle.csv", index=True)
+    print(f"\nEICC band {EICC_LON[0]:g}-{EICC_LON[1]:g}°E, mean northward velocity (m/s) by month:")
+    print(cycle.round(3).rename(index=dict(enumerate(MONTH_NAMES, 1))).T.to_string())
+
+    fig, ax = plt.subplots(figsize=(11, 5.5), constrained_layout=True)
+    for months, colour, label in [((6, 9), "coral", "Southwest months"), ((12, 12), "steelblue", None),
+                                  ((1, 2), "steelblue", "Northeast months")]:
+        ax.axvspan(months[0] - 0.5, months[1] + 0.5, color=colour, alpha=0.15, label=label)
+    ax.axhline(0, color="grey", linewidth=0.8)
+    ax.plot(cycle.index, cycle["smooth_vn"], "o-", color="black", label=f"Monthly ({best})")
+    for span in [(6, 9), (12, 12), (1, 2)]:
+        value = cycle.loc[span[0], "fixed_vn"]
+        ax.hlines(value, span[0] - 0.5, span[1] + 0.5, color="firebrick", linewidth=2.5,
+                  label=FIXED_SEASONS.capitalize() if span == (6, 9) else None)
+    ax.set_xticks(range(1, 13), labels=MONTH_NAMES)
+    ax.set(xlim=(0.5, 12.5), ylabel="Mean northward velocity (m/s)",
+           title=f"Annual cycle of the northward current, EICC band {EICC_LON[0]:g}-{EICC_LON[1]:g}°E "
+                 f"(drogued drifters)")
+    ax.legend(loc="best", fontsize=9)
+    save_fig(fig, "17_eicc_annual_cycle.png")
+
+    return {"best": best, "improvement": improvement, "ci": ci, "rmse": in_seasons}
+
+
 def run():
     """Run the full analysis from start to finish."""
     section("LOAD")
@@ -1587,6 +1857,9 @@ def run():
     drogue_sensitivity(grid_all, grid_dr)
     sst_grid = sst_analysis(drogued)
 
+    # Alternative to fixed seasons: monthly maps with smooth temporal weighting
+    temporal = temporal_weighting_analysis(obs[obs["drogue"]])
+
     # Headline numbers, written to summary.txt
     kept = grid_dr[grid_dr["sufficient"]]
     lines = [
@@ -1612,6 +1885,10 @@ def run():
                      f"95% CI {r['ci95_low_pct']:.1f}-{r['ci95_high_pct']:.1f}%); "
                      f"> 135 deg: {r['gt135_pct']:.1f}% (median {r['gt135_boot_median_pct']:.1f}%, "
                      f"95% CI {r['gt135_ci95_low_pct']:.1f}-{r['gt135_ci95_high_pct']:.1f}%)")
+    lines += ["", "Smooth temporal weighting vs fixed seasons (leave-one-drifter-out, SW + NE months):",
+              f"  Selected: {temporal['best']}; RMSE {temporal['rmse'][temporal['best']]:.4f} m/s vs "
+              f"{temporal['rmse'][FIXED_SEASONS]:.4f} m/s for fixed seasons, reduction "
+              f"{temporal['improvement']:+.1f}% (95% CI {temporal['ci'][0]:+.1f} to {temporal['ci'][1]:+.1f}%)"]
     text = "\n".join(lines)
     section("SUMMARY")
     print(text)

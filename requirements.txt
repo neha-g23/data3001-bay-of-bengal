@@ -1,0 +1,13 @@
+# Python packages needed to run project3001.py.
+# Versions are the ones the analysis was developed and tested with (Python 3.13).
+clouddrift==0.48.1
+xarray==2026.9.0
+netCDF4==1.7.4
+h5netcdf==1.8.2
+h5py==3.16.0
+pandas==3.0.6
+numpy==2.5.3
+scipy==1.18.1
+matplotlib==3.11.2
+Cartopy==0.26.0
+shapely==2.2.0

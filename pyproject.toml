@@ -1,0 +1,35 @@
+# Project settings for reproducing the Bay of Bengal monsoon circulation analysis.
+# Versions are the ones the analysis was developed and tested with (Python 3.13),
+# and match requirements.txt. Keep the two files in sync.
+
+[project]
+name = "project3001"
+version = "1.0.0"
+description = "Bias-corrected seasonal surface circulation and SST climatology of the Bay of Bengal from NOAA Global Drifter Program data"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "clouddrift==0.48.1",
+    "xarray==2026.9.0",
+    "netCDF4==1.7.4",
+    "h5netcdf==1.8.2",
+    "h5py==3.16.0",
+    "pandas==3.0.6",
+    "numpy==2.5.3",
+    "scipy==1.18.1",
+    "matplotlib==3.11.2",
+    "Cartopy==0.26.0",
+    "shapely==2.2.0",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# The analysis is a single script, run in place with `python project3001.py`.
+py-modules = ["project3001"]
+
+[tool.uv]
+# Install the dependencies only; the script itself is not installed as a package.
+package = false
