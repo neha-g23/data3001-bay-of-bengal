@@ -2,8 +2,7 @@
 ======================================================================
 LOAD
 ======================================================================
-Computing subset from gdp1h() (this takes a few minutes)...
-Saved subset to disk.
+Loading cached subset: C:\Users\alish\data3001\bob_subset.nc
 Observations: 866511, drifters: 388
 
 ======================================================================
@@ -112,6 +111,79 @@ Southwest    135            31   99
   -> tables/climatology_grid_all.csv
 
 ======================================================================
+SPATIAL KERNEL SMOOTHING — DROGUED ONLY
+======================================================================
+Drifters: 268 total, 214 training, 54 testing
+
+Running leave-one-drifter-out cross-validation...
+  -> tables/kernel_bandwidth_cv.csv
+
+TRAINING CROSS-VALIDATION:
+    scope  bandwidth_km  rmse_vector_mps  n_drifters  n_drifter_seasons  n_heldout_cell_means
+Southwest           0.0           0.3232         151                151                  1582
+Southwest          25.0           0.3232         151                151                  1582
+Southwest          40.0           0.3212         151                151                  1582
+Southwest          50.0           0.3185         151                151                  1582
+Southwest          60.0           0.3183         151                151                  1582
+Southwest          75.0           0.3223         151                151                  1582
+Southwest          90.0           0.3275         151                151                  1582
+Southwest         100.0           0.3307         151                151                  1582
+Southwest         125.0           0.3385         151                151                  1582
+Southwest         175.0           0.3511         151                151                  1582
+Southwest         250.0           0.3633         151                151                  1582
+Southwest         350.0           0.3704         151                151                  1582
+Northeast           0.0           0.4056          96                 96                   643
+Northeast          25.0           0.4056          96                 96                   643
+Northeast          40.0           0.4019          96                 96                   643
+Northeast          50.0           0.3948          96                 96                   643
+Northeast          60.0           0.3884          96                 96                   643
+Northeast          75.0           0.3848          96                 96                   643
+Northeast          90.0           0.3834          96                 96                   643
+Northeast         100.0           0.3832          96                 96                   643
+Northeast         125.0           0.3832          96                 96                   643
+Northeast         175.0           0.3871          96                 96                   643
+Northeast         250.0           0.3962          96                 96                   643
+Northeast         350.0           0.4047          96                 96                   643
+  Overall           0.0           0.3575         206                247                  2225
+  Overall          25.0           0.3575         206                247                  2225
+  Overall          40.0           0.3548         206                247                  2225
+  Overall          50.0           0.3502         206                247                  2225
+  Overall          60.0           0.3473         206                247                  2225
+  Overall          75.0           0.3479         206                247                  2225
+  Overall          90.0           0.3503         206                247                  2225
+  Overall         100.0           0.3521         206                247                  2225
+  Overall         125.0           0.3566         206                247                  2225
+  Overall         175.0           0.3655         206                247                  2225
+  Overall         250.0           0.3764         206                247                  2225
+  Overall         350.0           0.3841         206                247                  2225
+
+Selected bandwidth: 60 km
+
+INDEPENDENT HELD-OUT TEST:
+    scope  bandwidth_km  rmse_vector_mps  n_drifters  n_drifter_seasons  n_heldout_cell_means
+Southwest           0.0           0.3061          41                 41                   431
+Southwest          60.0           0.2985          41                 41                   431
+Northeast           0.0           0.3745          21                 21                   156
+Northeast          60.0           0.3542          21                 21                   156
+  Overall           0.0           0.3308          54                 62                   587
+  Overall          60.0           0.3185          54                 62                   587
+Southwest: original=0.3061, smoothed=0.2985 m/s, improvement=+2.5%
+Northeast: original=0.3745, smoothed=0.3542 m/s, improvement=+5.4%
+Overall: original=0.3308, smoothed=0.3185 m/s, improvement=+3.7%
+  -> tables/kernel_heldout_test.csv
+  -> tables/kernel_heldout_drifter_errors.csv
+  -> tables/kernel_heldout_bootstrap.csv
+
+KERNEL BOOTSTRAP ROBUSTNESS:
+ bandwidth_km  n_test_drifters  n_bootstrap  observed_improvement_pct  bootstrap_mean_improvement_pct  ci95_low_pct  ci95_high_pct  bootstrap_positive_pct
+         60.0               54         5000                     3.739                           3.724         1.623          5.707                   99.96
+  -> tables/kernel_smoothed_grid_drogued.csv
+  -> figures/13_kernel_raw_vs_smoothed.png
+  -> figures/14_kernel_bandwidth_cv.png
+  -> figures/15_kernel_difference.png
+  -> kernel_summary.txt
+
+======================================================================
 CIRCULATION MAPS
 ======================================================================
   -> figures/06_circulation_drogued.png
@@ -198,15 +270,15 @@ Northeast: direction change >15 deg: 45.8%, >30 deg: 23.5%, >45 deg: 14.0%, >90 
   corr(n drogued drifters, direction diff) = -0.028
 
 By number of drogued drifters in the cell:
-                       abs_speed_diff                      angle_diff                         
-                                count median   mean    max      count  median    mean      max
-monsoon   sample_group                                                                        
-Northeast 3-4                      70  0.062  0.071  0.327         70  11.137  21.808  164.225
-          5-9                      99  0.049  0.067  0.308         99  17.177  26.167  159.578
-          10+                      10  0.021  0.051  0.171         10   9.977  10.061   21.324
-Southwest 3-4                      43  0.050  0.054  0.151         43  14.181  27.452  153.361
-          5-9                      64  0.040  0.052  0.342         64  11.047  17.880   86.627
-          10+                      94  0.020  0.028  0.102         94   4.844   7.605   76.930
+                       abs_speed_diff                      angle_diff                               
+                                count median   mean    max      count  median       mean         max
+monsoon   sample_group                                                                              
+Northeast 3-4                      70  0.062  0.071  0.327         70  11.137  21.808001  164.225006
+          5-9                      99  0.049  0.067  0.308         99  17.177  26.167000  159.578003
+          10+                      10  0.021  0.051  0.171         10   9.977  10.061000   21.323999
+Southwest 3-4                      43  0.050  0.054  0.151         43  14.181  27.452000  153.360992
+          5-9                      64  0.040  0.052  0.342         64  11.047  17.879999   86.626999
+          10+                      94  0.020  0.028  0.102         94   4.844   7.605000   76.930000
   -> tables/drogue_sensitivity_cells.csv
   -> figures/10_drogue_sensitivity_scatter.png
   -> figures/11_drogue_sensitivity_map.png
@@ -233,6 +305,46 @@ Southwest  198.0  28.96  0.40  27.99  28.73  28.89  29.18  30.26
   -> figures/12_sst.png
 
 ======================================================================
+SMOOTH TEMPORAL WEIGHTING (drogued only, all months)
+======================================================================
+Drifter-month-cell records: 5761 from 299 drifters
+
+Leave-one-drifter-out cross-validation (lower RMSE is better):
+         scope                        method  rmse_vector_mps  n_test_cases  n_drifters
+    All months             target month only           0.3226          3099         267
+    All months  Gaussian, sigma = 0.5 months           0.3169          3099         267
+    All months Gaussian, sigma = 0.75 months           0.3175          3099         267
+    All months    Gaussian, sigma = 1 months           0.3210          3099         267
+    All months  Gaussian, sigma = 1.5 months           0.3299          3099         267
+    All months    Gaussian, sigma = 2 months           0.3394          3099         267
+    All months    Gaussian, sigma = 3 months           0.3561          3099         267
+SW + NE months             target month only           0.3186          2132         235
+SW + NE months  Gaussian, sigma = 0.5 months           0.3130          2132         235
+SW + NE months Gaussian, sigma = 0.75 months           0.3139          2132         235
+SW + NE months    Gaussian, sigma = 1 months           0.3179          2132         235
+SW + NE months  Gaussian, sigma = 1.5 months           0.3269          2132         235
+SW + NE months    Gaussian, sigma = 2 months           0.3358          2132         235
+SW + NE months    Gaussian, sigma = 3 months           0.3515          2132         235
+SW + NE months fixed seasons (main analysis)           0.3367          2132         235
+  -> tables/temporal_weighting_cv.csv
+
+Selected weighting: Gaussian, sigma = 0.5 months
+SW + NE months: fixed seasons RMSE 0.3367 m/s, Gaussian, sigma = 0.5 months RMSE 0.3130 m/s, reduction +7.0% (95% CI +4.1 to +9.4%)
+(The width is chosen on the same drifters it is tested on, so this comparison is slightly optimistic for the temporal weighting.)
+  -> tables/monthly_climatology_drogued.csv
+
+Mapped cells per month: Jan 65, Feb 26, Mar 19, Apr 28, May 35, Jun 48, Jul 86, Aug 119, Sep 104, Oct 91, Nov 110, Dec 102
+  -> figures/16_monthly_circulation.png
+  -> tables/eicc_monthly_cycle.csv
+
+EICC band 80-85°E, mean northward velocity (m/s) by month:
+month                 Jan     Feb     Mar     Apr     May     Jun     Jul     Aug     Sep     Oct     Nov     Dec
+smooth_vn          -0.024   0.050   0.040   0.080  -0.045  -0.017   0.128   0.122   0.117  -0.095  -0.118  -0.136
+weighted_drifters  36.338  26.851  11.393  10.175  17.772  23.825  46.524  34.151  27.670  28.882  40.664  41.878
+fixed_vn           -0.065  -0.065     NaN     NaN     NaN   0.096   0.096   0.096   0.096     NaN     NaN  -0.065
+  -> figures/17_eicc_annual_cycle.png
+
+======================================================================
 SUMMARY
 ======================================================================
 HEADLINE NUMBERS
@@ -250,5 +362,8 @@ SW vs NE reversal (> 90 deg):
   [drogued only] Approx. EICC band 80-85E: 61.5% of 39 cells (bootstrap median 60.0%, 95% CI 41.5-74.1%); > 135 deg: 25.6% (median 33.3%, 95% CI 18.0-47.9%)
   [all data] Whole Bay of Bengal: 70.3% of 209 cells (bootstrap median 70.6%, 95% CI 64.0-76.5%); > 135 deg: 45.9% (median 41.5%, 95% CI 35.0-50.0%)
   [all data] Approx. EICC band 80-85E: 65.2% of 46 cells (bootstrap median 64.1%, 95% CI 52.3-78.0%); > 135 deg: 34.8% (median 35.0%, 95% CI 23.4-48.6%)
+
+Smooth temporal weighting vs fixed seasons (leave-one-drifter-out, SW + NE months):
+  Selected: Gaussian, sigma = 0.5 months; RMSE 0.3130 m/s vs 0.3367 m/s for fixed seasons, reduction +7.0% (95% CI +4.1 to +9.4%)
 
 All outputs written to C:\Users\alish\data3001\outputs

@@ -1,0 +1,2 @@
+bandwidth_km,n_test_drifters,n_bootstrap,observed_improvement_pct,bootstrap_mean_improvement_pct,ci95_low_pct,ci95_high_pct,bootstrap_positive_pct
+60.0,54,5000,3.739209504864987,3.724164827017598,1.6229467016438395,5.706628566592708,99.96000000000001

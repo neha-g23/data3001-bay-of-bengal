@@ -1,0 +1,7 @@
+scope,bandwidth_km,rmse_vector_mps,n_drifters,n_drifter_seasons,n_heldout_cell_means
+Southwest,0.0,0.3060837858326605,41,41,431
+Southwest,60.0,0.29850083559097873,41,41,431
+Northeast,0.0,0.374455419097696,21,21,156
+Northeast,60.0,0.35419540556065204,21,21,156
+Overall,0.0,0.33082820609211977,54,62,587
+Overall,60.0,0.3184578463651489,54,62,587

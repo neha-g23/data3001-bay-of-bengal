@@ -1,0 +1,11 @@
+SPATIAL GAUSSIAN KERNEL SMOOTHING
+Main climatology results unchanged.
+Only originally sufficient grid cells are smoothed.
+Selected bandwidth: 60 km
+Training drifters: 214
+Test drifters: 54
+Original held-out RMSE: 0.33083 m/s
+Smoothed held-out RMSE: 0.31846 m/s
+Improvement: +3.74%
+Limitation: geographical smoothing does not account for land barriers or sharp ocean fronts.
+Original bootstrap uncertainty does not describe the smoothed estimator.
