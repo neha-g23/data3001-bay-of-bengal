@@ -1,154 +1,59 @@
-# PROJECT PROPOSAL
-## 1. Research Question and Objective 
-## 2. Region and Data
+# Bay of Bengal monsoon reversal figures
 
-**Region R:** Bay of Bengal, **5°N–23°N, 78°E–99°E**.
+`reversal_figures.py` makes every reversal figure for our DATA3001 project from the cached Global Drifter Program subset (`bob_subset.nc`, hourly drifter data, 14 July 2000 to 30 June 2022, 5–23°N, 78–99°E).
 
-* **Dataset**: NOAA GDP 1-hourly dataset (`gdp1h`, Elipot et al., 2016) accessed via `clouddrift`.
-* **Variables**: `id` (drifter buoy ID), `time` (1-hourly timestamp), `latitude` (°N), `longitude` (°E), `ve` (eastward velocity, m/s), `vn` (northward velocity, m/s), `drogue_presence` (boolean sea-anchor status).
+## How to run
 
-| Measure | Value | Acceptable range |
-|---|---|---|
-| Global hourly observations | 197,214,787 | – |
-| Bay of Bengal observations | 866,511 (≈0.44% of global observations) | 0.8–3.9 million  |
-| Distinct drifters in Bay of Bengal | 388 | 363–1,106  |
-| Mean observations per drifter | ≈2,230 hours (≈93 days) | – |
-
-**Data adequacy:** Both counts meet the brief's range, but it is only just above the minimums. Because hourly data from one drifter are strongly autocorrelated, the effective sample is closer to 388 drifters than 866,511 rows. We therefore focus on seasonal maps and flag cells with insufficient coverage rather than over-interpret them without success.
-
-## 3.Significance of the Project
-
-## 4.Intro Background and Existing Studies 
-
-## 5.Proposed Method
-
-## 6.Initial analysis and visualisation
-
-## 7.Timeline Plan
-| Phase / Milestone | Target Date | Key Deliverables & Focus |
-| :--- | :--- | :--- |
-| **Phase 1: Setup & Proposal** | Weeks 1–4 | Region R selection, data-adequacy validation, repository setup, and **Project Proposal / README** (15%, Due W4). |
-| **Phase 2: Baseline Climatology** | Weeks 4–5 | Extract velocity vectors (`ve`, `vn`), build initial 1° × 1° mean circulation maps, and deliver **Poster Session** (20%, W5). |
-| **Phase 3: Feedback & Decomposition** | Weeks 6–7 | Complete **Peer Review of Posters** (5%, W6), apply drogue-status filtering, and split velocity fields into Southwest/Northeast monsoon seasons. |
-| **Phase 4: Uncertainty & Weighting** | Weeks 8–9 | Calculate cell-by-cell standard errors, spatial variance, and apply post-stratification to unweight drifter convergence traps. |
-| **Phase 5: Presentation & Final Report** | Weeks 10–11 | Deliver **Group Presentation** (25%, W10), export standardized climatology dataset, and submit **Final Report** (40%, W11). |
-
-
-## How to Reproduce the Analysis
-
-### What you need
-
-- **Python 3.13** (other recent versions may work, but 3.13 is what was tested).
-  Download it from https://www.python.org/downloads/.
-- **The files in this folder:** `project3001.py`, `pyproject.toml`, `uv.lock`,
-  `requirements.txt` and, ideally, `bob_subset.nc` (the Bay of Bengal data,
-  about 70 MB).
-- **Not** the `.venv313` or `.venv` folders. These only work on the computer
-  they were created on, so set up your own (below).
-
-### Setup (once)
-
-Open a terminal in this folder and set up an environment with the required
-packages, using **one** of the two options below.
-
-#### Option A: uv (recommended, exact reproduction)
-
-[uv](https://docs.astral.sh/uv/getting-started/installation/) reads
-`pyproject.toml` and `uv.lock`, installs Python 3.13 if needed, and installs
-exactly the package versions the analysis was tested with (including every
-indirect dependency).
-
-```
-uv sync
+```bash
+pip install -r requirements.txt
+python reversal_figures.py --data bob_subset.nc --out figures
 ```
 
-Then run the analysis with:
+Options:
 
-```
-uv run python project3001.py
-```
+- `--drifters drogued`: main figures only (drogued drifters)
+- `--drifters all`: robustness versions only (drogued + undrogued)
+- `--drifters both`: both sets (default)
 
-#### Option B: pip
+The whole run takes about a minute. `bob_subset.nc` is not in the repository; put your copy next to the script.
 
-**Windows**
+## What it produces
 
-```
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt
-```
+Each figure is made twice, ending in `_drogued.png` (main) or `_all_drifters.png` (robustness check).
 
-**Mac / Linux**
+| File | What it shows |
+|---|---|
+| `seasonal_speed_*` | Smoothed surface currents in the Southwest and Northeast monsoons (colour = speed) |
+| `seasonal_east_west_*` | Same, coloured by east-west flow (red = east, blue = west) |
+| `direction_change_map_*` | Change in current direction between the two monsoons (0–180°) |
+| `direction_change_map_annotated_*` | Same, with the share reversing in each latitude band and the coastal band |
+| `direction_change_chart_*` | Distribution of direction change, and share reversing by region |
+| `reversal_vs_speed_*` | Share reversing against current speed |
+| `reversal_vs_coast_distance_*` | Speed and reversal against distance from India's east coast and Sri Lanka |
+| `monthly_speed_*` | Smoothed currents for each monsoon month (June–September, December–February) |
+| `monthly_east_west_*` | East-west flow for all 12 months |
+| `monthly_reversal_maps_*`, `monthly_reversal_line_*` | Direction change of each month relative to July |
+| `eicc_timeline_*` | Monthly along-coast current within 150 km of India's east coast, with bootstrap intervals |
 
-```
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-```
+The script also prints the key numbers (reversal shares, distance-band table, monthly shares, coastal velocities).
 
-### Run
+## Method
 
-If you used uv, run `uv run python project3001.py` (see above). With pip:
+1. **Cleaning:** drop missing values and speeds above 3 m/s.
+2. **Seasons:** Southwest monsoon = June–September, Northeast monsoon = December–February.
+3. **Drifter weighting:** average within each drifter in each 1° cell (at least 12 hourly observations), so a drifter that lingers cannot dominate.
+4. **Kernel smoothing:** Gaussian kernel on great-circle distance, 75 km for seasonal maps and 100 km for monthly maps. Both bandwidths were chosen by cross-validation that holds out whole drifters (in the main project code).
+5. **Coverage rule:** a location is shown only if at least 3 different drifters lie within 100 km. This radius is fixed, so maps at different bandwidths differ only in smoothness.
+6. **Direction change:** angle between the Southwest and Northeast current at each location. Currents slower than 0.1 m/s are excluded from reversal percentages because their direction is not meaningful.
+7. **Area weighting:** percentages are weighted by cos(latitude), because grid cells shrink towards the north.
 
-**Windows**
+## Settings
 
-```
-.venv\Scripts\python project3001.py
-```
+All settings are at the top of the script (`BANDWIDTH_SEASON_KM`, `MIN_DRIFTERS`, `SUPPORT_KM`, `MIN_SPEED_DIRECTION`, and so on). Change them there rather than in the functions.
 
-**Mac / Linux**
+## Limitations
 
-```
-.venv/bin/python project3001.py
-```
-
-This analyses the default dataset, drogued drifters. To choose another dataset,
-or run all three and compare them, add `--dataset`:
-
-| Command option | What it does |
-| --- | --- |
-| *(none)* or `--dataset drogued` | drogued drifters only (the default) |
-| `--dataset undrogued` | undrogued drifters only |
-| `--dataset all` | all drifters |
-| `--dataset every` | all three datasets, then the comparison |
-| `--compare` | only the comparison, from results already saved |
-
-For example: `.venv\Scripts\python project3001.py --dataset every`.
-
-With `bob_subset.nc` in the folder, a run takes about a minute per dataset.
-
-Without `bob_subset.nc`, the first run downloads the global drifter dataset
-over the internet and cuts it down to the Bay of Bengal. This takes several
-minutes and needs a good connection; the result is saved as `bob_subset.nc`
-so later runs are fast. If you can, get a copy of `bob_subset.nc` instead
-(it is often too large for email; use a shared drive or cloud link).
-
-The first run also downloads coastline data (about 2 MB) to draw land on the
-maps. If that download fails, the maps are drawn without land and all results
-are unaffected.
-
-### Outputs
-
-Each dataset is written to its own folder, `outputs/drogued/`,
-`outputs/undrogued/` or `outputs/all/`:
-
-| Path | Contents |
-| --- | --- |
-| `figures/` | maps and charts (PNG) |
-| `tables/` | gridded climatology and supporting tables (CSV) |
-| `report.txt` | full printed log of the run |
-| `summary.txt` | headline numbers |
-| `reversal_caption.txt` | ready-to-use caption for the reversal map |
-
-The comparison of the datasets is written to `outputs/comparison/`: a
-side-by-side table of headline numbers (`tables/dataset_comparison.csv`), the
-reversal percentages by dataset, circulation maps by dataset, and cell-by-cell
-comparisons of each pair of datasets.
-
-### Troubleshooting
-
-- **`No Python at ...` or `did not find executable`**: you are using a copied
-  `.venv313` folder. Delete it and follow the setup steps above.
-- **`ModuleNotFoundError: No module named ...`**: the packages are not
-  installed in the Python you are running. Run the setup steps, then start the
-  script with the `.venv` Python as shown under *Run*.
-- **Very slow first run or a download error**: `bob_subset.nc` is missing; see
-  above.
+- The coastline used for distances and the coastal band is a simple hand-drawn line, so distances are approximate.
+- "White" areas are places no drifter has visited (mostly land), not a true land mask.
+- Undrogued drifters are also pushed by the wind, so the `_all_drifters` versions may slightly overstate current speeds.
+- Smoothed reversal percentages are higher than the gridded estimate in the main analysis, because smoothing removes noise and slow currents are excluded. State which definition you use.
