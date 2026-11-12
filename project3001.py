@@ -35,10 +35,10 @@ Method in brief
    confidence intervals. To show how much of this is caused by the monsoon,
    the same comparison is made between different years of the same season,
    which shows how much direction change occurs without a monsoon contrast.
-7. As an alternative to the fixed seasons, build a map for every calendar
-   month in which observations from neighbouring months count with smoothly
-   decreasing weight. The amount of smoothing is chosen by cross-validation
-   and compared with the fixed seasons.
+7. Build two smooth versions of the seasonal maps, spatial kernel smoothing
+   and kriging (Gaussian process regression), and test both against the raw
+   grid on drifters held out from the fitting. Kriging also gives an
+   uncertainty for every ocean cell, including cells too thin for the main map.
 
 How to run
 ----------
@@ -69,7 +69,8 @@ matplotlib.use("Agg")  # draw straight to files, never open a window
 import matplotlib.pyplot as plt
 from matplotlib.collections import PolyCollection
 from matplotlib.colors import BoundaryNorm, ListedColormap, Normalize
-from matplotlib.patches import Patch
+from matplotlib.patches import Patch, PathPatch
+from matplotlib.path import Path as MplPath
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -112,10 +113,6 @@ SEED = 0                         # random seed, so results are reproducible
 # --- East India Coastal Current (EICC) band ---
 EICC_LON = (80.0, 85.0)          # western Bay longitude band used as an approximate EICC region
                                  # (a simple longitude band, not a coastline-following mask)
-
-# --- Smooth temporal weighting (alternative to the fixed seasons above) ---
-TEMPORAL_SIGMAS = (0.0, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)   # widths of the Gaussian month weighting
-                                                          # to test, in months; 0 = target month only
 
 # --- Interannual baseline (same season, different years) ---
 BASELINE_MIN_DRIFTERS = 1        # drifters a cell needs in each half-data map. Lower than MIN_DRIFTERS
@@ -357,6 +354,99 @@ def season_cell_map(ax, g, value_col, cmap, norm, title, arrows=False):
     if arrows and len(ok):
         speed = np.where(ok["speed"] > 0, ok["speed"], 1.0)
         ax.quiver(ok["lon"], ok["lat"], ok["ve"] / speed, ok["vn"] / speed,
+                  color="black", angles="xy", scale=25, width=0.003, zorder=3)
+    add_land(ax)
+    setup_map(ax, title)
+
+
+# Smooth display of the kernel and kriging maps. These two methods estimate a
+# continuous current field, so their maps are drawn as smooth colour fields
+# rather than 1° blocks: each method is evaluated on a fine lattice of points
+# (every DISPLAY_RES degrees) and the colours are contoured between them, then
+# trimmed exactly to the area the method maps and to the coastline. This shows
+# the fitted field as it is, without inventing detail (both fields vary over
+# 60 km or more, far wider than the lattice spacing). All numbers in the tables
+# are still computed on the 1° cells. The raw grid is never drawn this way:
+# each of its cells is a separate drifter average.
+DISPLAY_RES = 0.1                     # lattice spacing, degrees
+DISPLAY_LEVELS = 64                   # colour steps for continuous values (enough to look seamless)
+DISPLAY_LONS = np.round(np.arange(LON_RANGE[0], LON_RANGE[1] + DISPLAY_RES / 2, DISPLAY_RES), 6)
+DISPLAY_LATS = np.round(np.arange(LAT_RANGE[0], LAT_RANGE[1] + DISPLAY_RES / 2, DISPLAY_RES), 6)
+
+_land_shape = None
+
+
+def land_shape():
+    """The coastline polygons as one shape (None if the coastline is unavailable)."""
+    global _land_shape
+    if _land_shape is None and _get_land():
+        from shapely.geometry import Polygon
+        from shapely.ops import unary_union
+        _land_shape = unary_union([Polygon(p).buffer(0) for p in _get_land() if len(p) >= 4])
+    return _land_shape
+
+
+def display_points(cells):
+    """Lattice points for drawing a smooth field over a set of 1° cells (lon0,
+    lat0). Returns the points (lon, lat and lattice indices ix, iy), reaching a
+    little beyond the cells so the colours run right up to their edges, and the
+    area to show: the cells, minus land."""
+    from shapely import contains_xy
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+    area = unary_union([box(x, y, x + GRID, y + GRID)
+                        for x, y in cells[["lon0", "lat0"]].drop_duplicates().itertuples(index=False)])
+    X, Y = np.meshgrid(DISPLAY_LONS, DISPLAY_LATS)
+    iy, ix = np.nonzero(contains_xy(area.buffer(2 * DISPLAY_RES), X, Y))
+    points = pd.DataFrame({"ix": ix, "iy": iy, "lon": DISPLAY_LONS[ix], "lat": DISPLAY_LATS[iy]})
+    if land_shape() is not None:
+        area = area.difference(land_shape())
+    return points, area
+
+
+def _shape_patch(shape):
+    """An invisible patch tracing a shape (with any holes), used to trim a colour field."""
+    from shapely.geometry.polygon import orient
+    verts, codes = [], []
+    for poly in getattr(shape, "geoms", [shape]):
+        if poly.geom_type != "Polygon" or poly.is_empty:
+            continue
+        poly = orient(poly, 1.0)          # outer edge anticlockwise, holes clockwise
+        for ring in [poly.exterior, *poly.interiors]:
+            xy = np.asarray(ring.coords)
+            verts += xy.tolist()
+            codes += [MplPath.MOVETO] + [MplPath.LINETO] * (len(xy) - 2) + [MplPath.CLOSEPOLY]
+    return PathPatch(MplPath(verts, codes), facecolor="none", edgecolor="none")
+
+
+def draw_smooth(ax, points, values, area, cmap, norm, levels=None):
+    """Draw a smooth colour field from values at the lattice points, trimmed to
+    `area`. `levels` gives category boundaries; otherwise many fine steps."""
+    Z = np.full((len(DISPLAY_LATS), len(DISPLAY_LONS)), np.nan)
+    Z[points["iy"].to_numpy(), points["ix"].to_numpy()] = np.asarray(values, dtype=float)
+    if area.is_empty or not np.isfinite(Z).any():
+        return
+    extend = "neither" if levels is not None else "both"   # categories already span every value
+    if levels is None:
+        levels = np.linspace(norm.vmin, norm.vmax, DISPLAY_LEVELS + 1)
+    field = ax.contourf(DISPLAY_LONS, DISPLAY_LATS, np.ma.masked_invalid(Z), levels=levels, cmap=cmap,
+                        norm=norm, extend=extend, zorder=0)
+    clip = _shape_patch(area)
+    ax.add_patch(clip)
+    field.set_clip_path(clip)
+
+
+def smooth_season_map(ax, points, values, area, cmap, norm, title, arrows=None, hatched=None):
+    """One season's map of a smooth method: the smooth colour field, optional
+    direction arrows (a frame with lon, lat, ve, vn, one per 1° cell) and
+    optional hatching of 1° cells the method does not map."""
+    if hatched is not None:
+        draw_insufficient(ax, hatched)
+    draw_smooth(ax, points, values, area, cmap, norm)
+    if arrows is not None and len(arrows):
+        speed = np.hypot(arrows["ve"], arrows["vn"])
+        speed = np.where(speed > 0, speed, 1.0)
+        ax.quiver(arrows["lon"], arrows["lat"], arrows["ve"] / speed, arrows["vn"] / speed,
                   color="black", angles="xy", scale=25, width=0.003, zorder=3)
     add_land(ax)
     setup_map(ax, title)
@@ -799,6 +889,45 @@ def circulation_figures(grid):
     save_fig(fig, "08_uncertainty.png")
 
 
+# Reversal maps show the direction change per cell in four categories, so the
+# 90° reversal threshold is the split between blue (not reversed) and red
+# (reversed). Ocean cells without data in both seasons are hatched; land is
+# painted white underneath so the hatching stops at the coast.
+REVERSAL_NORM = BoundaryNorm(ANGLE_BINS, len(ANGLE_COLORS))
+REVERSAL_CMAP = ListedColormap(ANGLE_COLORS)
+REVERSAL_NO_DATA_STYLE = dict(facecolor="lightgrey", edgecolor="grey", hatch="//", alpha=0.6, linewidth=0)
+REVERSAL_NO_DATA_PATCH = Patch(**REVERSAL_NO_DATA_STYLE, label="No reliable data in one or both seasons")
+
+
+def draw_reversal_panel(ax, cells, title, smooth=None):
+    """One reversal map: cells coloured by SW-to-NE direction change. With
+    `smooth` (lattice points, direction change at each point, area to show), a
+    smooth method's field is drawn instead of the 1° cells."""
+    ax.add_patch(plt.Rectangle((LON_RANGE[0], LAT_RANGE[0]), np.ptp(LON_RANGE), np.ptp(LAT_RANGE),
+                               **REVERSAL_NO_DATA_STYLE, zorder=-1))
+    if _get_land():
+        ax.add_collection(PolyCollection(_get_land(), facecolors="white", edgecolors="none",
+                                         zorder=-0.5), autolim=False)
+    if smooth is None:
+        draw_cells(ax, cells, cells["angle_change"], REVERSAL_CMAP, REVERSAL_NORM)
+    else:
+        points, angle, area = smooth
+        draw_smooth(ax, points, angle, area, REVERSAL_CMAP, REVERSAL_NORM, levels=ANGLE_BINS)
+    add_land(ax)
+    setup_map(ax, title)
+
+
+def reversal_colorbar(fig, axes):
+    """Colour scale for reversal maps, labelled by category, with a bold line at 90°."""
+    cbar = add_colorbar(fig, axes, REVERSAL_CMAP, REVERSAL_NORM, "Direction change SW to NE (>90° = reversed)")
+    cbar.set_ticks([(lo + hi) / 2 for lo, hi in zip(ANGLE_BINS[:-1], ANGLE_BINS[1:])],
+                   labels=[f"{lo}-{hi}°\n{name.split(' (')[0]}"
+                           for lo, hi, name in zip(ANGLE_BINS[:-1], ANGLE_BINS[1:], ANGLE_LABELS)])
+    cbar.ax.tick_params(length=0)
+    cbar.ax.axhline(90, color="black", linewidth=2)
+    return cbar
+
+
 def reversal_analysis(per, grid):
     """Headline result: the percentage of cells whose current reverses (> 90°)
     and strongly reverses (> 135°) between monsoons, with 95% confidence
@@ -835,29 +964,11 @@ def reversal_analysis(per, grid):
     print(south.round(0).to_string(index=False))
     save_table(south, "reversal_southern_edge.csv")
 
-    # Reversal map: direction change per cell, in four categories so that the
-    # 90° reversal threshold is the split between blue (not reversed) and red
-    # (reversed). The headline numbers are written to reversal_caption.txt
-    # rather than the figure title. Ocean cells without data in both seasons are
-    # hatched; land is painted white underneath so the hatching stops at the coast.
-    norm, cmap = BoundaryNorm(ANGLE_BINS, len(ANGLE_COLORS)), ListedColormap(ANGLE_COLORS)
+    # Reversal map (headline numbers go to reversal_caption.txt, not the title)
     fig, ax = plt.subplots(figsize=(10, 8), constrained_layout=True)
-    no_data_style = dict(facecolor="lightgrey", edgecolor="grey", hatch="//", alpha=0.6, linewidth=0)
-    ax.add_patch(plt.Rectangle((LON_RANGE[0], LAT_RANGE[0]), np.ptp(LON_RANGE), np.ptp(LAT_RANGE),
-                               **no_data_style, zorder=-1))
-    if _get_land():
-        ax.add_collection(PolyCollection(_get_land(), facecolors="white", edgecolors="none",
-                                         zorder=-0.5), autolim=False)
-    draw_cells(ax, cells, cells["angle_change"], cmap, norm)
-    add_land(ax)
-    setup_map(ax, f"SW-to-NE change in current direction ({dataset_label()})")
-    add_land_legend(ax, [Patch(**no_data_style, label="No reliable data in one or both seasons")])
-    cbar = add_colorbar(fig, ax, cmap, norm, "Direction change SW to NE (>90° = reversed)")
-    cbar.set_ticks([(lo + hi) / 2 for lo, hi in zip(ANGLE_BINS[:-1], ANGLE_BINS[1:])],
-                   labels=[f"{lo}-{hi}°\n{name.split(' (')[0]}"
-                           for lo, hi, name in zip(ANGLE_BINS[:-1], ANGLE_BINS[1:], ANGLE_LABELS)])
-    cbar.ax.tick_params(length=0)
-    cbar.ax.axhline(90, color="black", linewidth=2)
+    draw_reversal_panel(ax, cells, f"SW-to-NE change in current direction ({dataset_label()})")
+    add_land_legend(ax, [REVERSAL_NO_DATA_PATCH])
+    reversal_colorbar(fig, ax)
     save_fig(fig, "09_reversal_map.png", dpi=300)
 
     caption = reversal_caption(summary)
@@ -883,6 +994,104 @@ def reversal_caption(rows):
                      f"> 90° change in {part(r.reversed_pct, r.boot_median_pct, r.ci95_low_pct, r.ci95_high_pct, 50)}; "
                      f"> 135° change in {part(r.gt135_pct, r.gt135_boot_median_pct, r.gt135_ci95_low_pct, r.gt135_ci95_high_pct, 25)}.")
     return "\n".join(lines)
+
+
+def smooth_reversal(cells, evaluate):
+    """SW-to-NE direction change of a smooth method, for drawing: the method is
+    evaluated in both seasons at the lattice points over `cells` (the 1° cells
+    it maps in both seasons), and the change is computed at every point from
+    the two smooth current fields. Returns (points, direction change, area)."""
+    points, area = display_points(cells)
+    sw = evaluate("Southwest", points["lon"], points["lat"])
+    ne = evaluate("Northeast", points["lon"], points["lat"])
+    return points, angle_between(sw[0], sw[1], ne[0], ne[1]), area
+
+
+def reversal_by_method(grid, kernel_grid, kernel_eval, gp):
+    """Monsoon reversal as seen by each mapping method: the kriging map (the
+    primary result) and its two baselines, the raw grid and the kernel-smoothed map.
+
+    All percentages are computed on the 1° cells. The raw and kernel maps cover
+    the same cells (enough drifters in both seasons). The kriging map has a value
+    for every ocean cell; its percentages use only cells that drifters entered
+    in both seasons, so they are not driven by estimates borrowed entirely from
+    neighbours, and those other cells are marked with an open circle. The
+    intervals for these percentages come from reversal_analysis (raw grid,
+    drifter bootstrap) and gp_analysis (kriging, simulated fields); this step
+    shows whether the pattern depends on the method. The kernel and kriging maps are drawn as
+    smooth fields, computing the direction change from each method's smooth SW
+    and NE currents at every lattice point."""
+    section(f"REVERSAL BY MAPPING METHOD ({dataset_label()})")
+    gp_grid = gp["grid"] if gp else None
+    maps = {"Raw grid (baseline)": paired_cells(grid)}
+    display = {}
+    if kernel_grid is not None:
+        maps["Kernel smoothing (baseline)"] = paired_cells(kernel_grid.assign(
+            ve=kernel_grid["kernel_ve"], vn=kernel_grid["kernel_vn"], speed=kernel_grid["kernel_speed"]))
+        display["Kernel smoothing (baseline)"] = smooth_reversal(maps["Kernel smoothing (baseline)"], kernel_eval)
+    if gp_grid is not None:
+        cells = paired_cells(gp_grid.assign(ve=gp_grid["gp_ve"], vn=gp_grid["gp_vn"],
+                                            speed=gp_grid["gp_speed"], sufficient=True))
+        display["Kriging (primary)"] = smooth_reversal(cells, gp["eval"])
+        seasons_entered = gp_grid[gp_grid["sampled"]].groupby(["lon0", "lat0"]).size()
+        entered_both = seasons_entered[seasons_entered == len(SEASONS)].index
+        cells["sampled_both"] = pd.MultiIndex.from_frame(cells[["lon0", "lat0"]]).isin(entered_both)
+        maps["Kriging (primary)"] = cells
+
+    def scored(name):
+        c = maps[name]
+        return c[c["sampled_both"]] if "sampled_both" in c else c
+
+    rows = []
+    for name in maps:
+        variants = [(name, scored(name))]
+        if "sampled_both" in maps[name]:
+            variants.append((f"{name}, every ocean cell", maps[name]))
+        for label, c in variants:
+            for region, mask in [("Whole Bay of Bengal", np.ones(len(c), bool)),
+                                 (f"Approx. EICC band {EICC_LON[0]:.0f}-{EICC_LON[1]:.0f}E", c["in_eicc_band"])]:
+                a = c.loc[mask, "angle_change"]
+                rows.append({"dataset": ACTIVE, "method": label, "region": region, "cells": len(a),
+                             "reversed_gt90_pct": (a > 90).mean() * 100,
+                             "reversed_gt135_pct": (a > 135).mean() * 100})
+    table = pd.DataFrame(rows)
+    print(table.round(1).to_string(index=False))
+    save_table(table, "reversal_by_method.csv")
+
+    circle = plt.Line2D([], [], marker="o", markerfacecolor="none", markeredgecolor="dimgrey", linestyle="",
+                        label="Kriging: no drifters in one or both seasons (left out of the %)")
+
+    def panel(ax, name):
+        c, s = maps[name], scored(name)
+        draw_reversal_panel(ax, c, f"{name}\n> 90° in {(s['angle_change'] > 90).mean() * 100:.0f}% "
+                                   f"of {len(s)} cells, > 135° in {(s['angle_change'] > 135).mean() * 100:.0f}%",
+                            smooth=display.get(name))
+        if "sampled_both" in c:
+            # open circles in each cell's sea part
+            pos = gp["marks"][gp["marks"]["monsoon"] == SEASONS[0]][["lon0", "lat0", "lon", "lat"]]
+            filled = c[~c["sampled_both"]][["lon0", "lat0"]].merge(pos, on=["lon0", "lat0"])
+            ax.scatter(filled["lon"], filled["lat"], **GP_NONE_STYLE)
+
+    # All methods side by side
+    fig, axes = plt.subplots(1, len(maps), figsize=(8.2 * len(maps), 7.8), constrained_layout=True,
+                             squeeze=False)
+    for ax, name in zip(axes[0], maps):
+        panel(ax, name)
+    add_land_legend(axes[0, 0], [REVERSAL_NO_DATA_PATCH] + ([circle] if "Kriging (primary)" in maps else []))
+    reversal_colorbar(fig, axes[0])
+    fig.suptitle(f"SW-to-NE change in current direction by mapping method ({dataset_label()})", fontsize=15)
+    save_fig(fig, "23_reversal_by_method.png", dpi=200)
+
+    # The smoothed methods also as full-size maps, matching 09_reversal_map.png
+    for name, tag in [("Kernel smoothing (baseline)", "kernel"), ("Kriging (primary)", "kriging")]:
+        if name in maps:
+            fig, ax = plt.subplots(figsize=(10, 8.4), constrained_layout=True)
+            panel(ax, name)
+            add_land_legend(ax, [REVERSAL_NO_DATA_PATCH] + ([circle] if tag == "kriging" else []))
+            reversal_colorbar(fig, ax)
+            fig.suptitle(f"SW-to-NE change in current direction ({dataset_label()})", fontsize=14)
+            save_fig(fig, f"09_reversal_map_{tag}.png", dpi=300)
+    return table
 
 
 # ============================================================
@@ -1342,14 +1551,16 @@ def kernel_score_table(prediction_errors):
 
 def kernel_smoothing_analysis(per, grid):
     """Run spatial kernel smoothing, validation and visualisation for the
-    active dataset (`per` = per-drifter cell means, `grid` = gridded climatology)."""
+    active dataset (`per` = per-drifter cell means, `grid` = gridded climatology).
+    Returns the chosen bandwidth, the smoothed 1° grid and a function giving the
+    smoothed velocity at any position (all None if there are too few drifters)."""
     section(f"SPATIAL KERNEL SMOOTHING ({dataset_label()})")
 
     drifter_ids = np.sort(per["drifter_id"].unique())
 
     if len(drifter_ids) < 10:
         print("Too few drifters for kernel validation.")
-        return None
+        return None, None, None
 
     train_ids, test_ids = train_test_drifters(per)
 
@@ -1586,6 +1797,22 @@ def kernel_smoothing_analysis(per, grid):
         f"kernel_smoothed_grid_{ACTIVE}.csv"
     )
 
+    # The smoothed field can be evaluated anywhere, which the smooth maps use:
+    # kernel_eval(season, lon, lat) -> (eastward, northward) velocity
+    references = {season: smoothed[(smoothed["monsoon"] == season) & smoothed["sufficient"]]
+                  for season in SEASONS}
+
+    def kernel_eval(season, lon, lat):
+        pred = kernel_predict(pd.DataFrame({"lon": np.asarray(lon), "lat": np.asarray(lat)}),
+                              references[season], h_best)
+        return pred[:, 0], pred[:, 1]
+
+    display = {}
+    for season in SEASONS:
+        points, area = display_points(references[season])
+        ve, vn = kernel_eval(season, points["lon"], points["lat"])
+        display[season] = (points, np.hypot(ve, vn), area)
+
     # --------------------------------------------------------
     # 4. FIGURE — ORIGINAL VS SMOOTHED
     # --------------------------------------------------------
@@ -1596,7 +1823,7 @@ def kernel_smoothing_analysis(per, grid):
 
     max_speed = max(
         float(smoothed["speed"].max()),
-        float(smoothed["kernel_speed"].max())
+        float(np.nanmax(np.concatenate([d[1] for d in display.values()])))
     )
 
     norm = Normalize(0, max_speed)
@@ -1614,16 +1841,14 @@ def kernel_smoothing_analysis(per, grid):
             arrows=True
         )
 
-        new = raw.copy()
-        new["ve"] = new["kernel_ve"]
-        new["vn"] = new["kernel_vn"]
-        new["speed"] = new["kernel_speed"]
-
-        season_cell_map(
-            axes[row, 1], new,
-            "speed", cmap, norm,
+        # Smooth colour field; arrows from the 1° smoothed values
+        mapped = raw[raw["sufficient"]]
+        points, speed, area = display[season]
+        smooth_season_map(
+            axes[row, 1], points, speed, area, cmap, norm,
             f"{season}: Gaussian kernel (h={h_best:g} km)",
-            arrows=True
+            arrows=mapped.assign(ve=mapped["kernel_ve"], vn=mapped["kernel_vn"]),
+            hatched=raw[~raw["sufficient"]]
         )
 
     add_land_legend(
@@ -1687,6 +1912,8 @@ def kernel_smoothing_analysis(per, grid):
     # --------------------------------------------------------
     # 6. FIGURE — MAGNITUDE OF SMOOTHING DIFFERENCES
     # --------------------------------------------------------
+    # Drawn on the 1° cells, not the display grid: the change is measured
+    # against the raw cell average, which exists only once per cell.
     fig, axes = plt.subplots(
         1, 2, figsize=(16, 7),
         constrained_layout=True
@@ -1784,7 +2011,7 @@ def kernel_smoothing_analysis(per, grid):
         )
 
     print("  -> kernel_summary.txt")
-    return h_best
+    return h_best, smoothed, kernel_eval
 
 
 # ============================================================
@@ -1878,26 +2105,56 @@ def gp_fit(xy, y, rng):
     return {"mean": mean, "variance": variance, "length_km": length_km, "noise": noise}
 
 
-def gp_predict(xy_train, y_train, xy_new, p):
-    """Best estimate and standard deviation of the underlying mean current at
-    new positions, given the training records and fitted parameters `p`.
-    The standard deviation describes the mean current itself; an individual
-    drifter would scatter around it with the additional noise variance."""
+def gp_predictor(xy_train, y_train, p, chunk=4000):
+    """Prepare kriging predictions from the training records and fitted
+    parameters `p`. Returns a function giving, at new positions, the best
+    estimate and standard deviation of the underlying mean current (the
+    standard deviation describes the mean current itself; an individual drifter
+    would scatter around it with the additional noise variance). The expensive
+    set-up is done once, and new positions are handled in batches."""
     # Ordinary kriging: the mean is estimated from the data (generalised least
     # squares), which is the same as requiring the kriging weights to sum to one.
     y = np.asarray(y_train, dtype=float)
     K = matern32(cdist(xy_train, xy_train), p["variance"], p["length_km"]) + p["noise"] * np.eye(len(xy_train))
     L = cholesky(K, lower=True)
-    K_new = matern32(cdist(xy_new, xy_train), p["variance"], p["length_km"])
     ones = np.ones(len(y))
     Kinv_1 = cho_solve((L, True), ones)
     mean = (Kinv_1 @ y) / (Kinv_1 @ ones)
     alpha = cho_solve((L, True), y - mean)
-    v = solve_triangular(L, K_new.T, lower=True)
-    # Simple-kriging variance plus the extra uncertainty from estimating the mean
-    extra = (1.0 - K_new @ Kinv_1) ** 2 / (Kinv_1 @ ones)
-    sd = np.sqrt(np.clip(p["variance"] - (v ** 2).sum(axis=0) + extra, 0.0, None))
-    return mean + K_new @ alpha, sd
+
+    def predict(xy_new, with_sd=True):
+        est, sds = [], []
+        for start in range(0, len(xy_new), chunk):
+            K_new = matern32(cdist(xy_new[start:start + chunk], xy_train), p["variance"], p["length_km"])
+            est.append(mean + K_new @ alpha)
+            if with_sd:
+                v = solve_triangular(L, K_new.T, lower=True)
+                # Simple-kriging variance plus the extra uncertainty from estimating the mean
+                extra = (1.0 - K_new @ Kinv_1) ** 2 / (Kinv_1 @ ones)
+                sds.append(np.sqrt(np.clip(p["variance"] - (v ** 2).sum(axis=0) + extra, 0.0, None)))
+        empty = np.empty(0)
+        return (np.concatenate(est) if est else empty,
+                (np.concatenate(sds) if sds else empty) if with_sd else None)
+
+    def joint(xy_new):
+        """Best estimate and full covariance at a (modest) set of positions,
+        describing how the uncertainties at nearby positions move together.
+        Used to simulate plausible current fields."""
+        K_new = matern32(cdist(xy_new, xy_train), p["variance"], p["length_km"])
+        v = solve_triangular(L, K_new.T, lower=True)
+        u = 1.0 - K_new @ Kinv_1
+        cov = (matern32(cdist(xy_new, xy_new), p["variance"], p["length_km"])
+               - v.T @ v + np.outer(u, u) / (Kinv_1 @ ones))
+        return mean + K_new @ alpha, cov
+
+    predict.joint = joint
+    return predict
+
+
+def gp_predict(xy_train, y_train, xy_new, p):
+    """Best estimate and standard deviation of the underlying mean current at
+    new positions (see gp_predictor)."""
+    return gp_predictor(xy_train, y_train, p)(xy_new)
 
 
 GP_VARIOGRAM_BIN_KM = 50.0     # width of the distance bins in the empirical variogram
@@ -1959,19 +2216,37 @@ def ocean_cells():
     """Every grid cell in the study region that is at least GP_MIN_SEA_FRACTION
     sea, according to the Natural Earth coastline drawn on the maps.
     Returns None if the coastline is unavailable."""
-    land = _get_land()
-    if not land:
+    land = land_shape()
+    if land is None:
         return None
-    from shapely.geometry import Polygon, box
-    from shapely.ops import unary_union
-    land_shape = unary_union([Polygon(p).buffer(0) for p in land if len(p) >= 4])
+    from shapely.geometry import box
     lon0, lat0 = np.meshgrid(np.arange(LON_RANGE[0], LON_RANGE[1], GRID),
                              np.arange(LAT_RANGE[0], LAT_RANGE[1], GRID))
     cells = pd.DataFrame({"lon0": lon0.ravel(), "lat0": lat0.ravel()})
-    sea = [1 - box(x, y, x + GRID, y + GRID).intersection(land_shape).area / GRID ** 2
+    sea = [1 - box(x, y, x + GRID, y + GRID).intersection(land).area / GRID ** 2
            for x, y in zip(cells["lon0"], cells["lat0"])]
     cells["sea_fraction"] = np.round(sea, 3)
     return cells[cells["sea_fraction"] >= GP_MIN_SEA_FRACTION].reset_index(drop=True)
+
+
+def sea_positions(cells):
+    """A point inside the sea part of each 1° cell (its centre when that is at
+    sea), for placing arrows and markers so coastal cells do not put them on land."""
+    land = land_shape()
+    out = cells.copy()
+    out["lon"], out["lat"] = out["lon0"] + GRID / 2, out["lat0"] + GRID / 2
+    if land is None:
+        return out
+    from shapely.geometry import Point, box
+    for i, (x, y) in enumerate(zip(out["lon0"], out["lat0"])):
+        if land.contains(Point(x + GRID / 2, y + GRID / 2)):
+            sea = box(x, y, x + GRID, y + GRID).difference(land)
+            if sea.is_empty:
+                out.iloc[i, out.columns.get_indexer(["lon", "lat"])] = np.nan
+            else:
+                c = sea.centroid if sea.contains(sea.centroid) else sea.representative_point()
+                out.iloc[i, out.columns.get_indexer(["lon", "lat"])] = [c.x, c.y]
+    return out
 
 
 GP_FEW_STYLE = dict(marker="x", color="grey", s=14, zorder=3.5)
@@ -1993,6 +2268,50 @@ def gp_coverage_legend():
                        label=f"Too few drifters for the main map (<{MIN_DRIFTERS})"),
             plt.Line2D([], [], marker="o", markerfacecolor="none", markeredgecolor="dimgrey",
                        linestyle="", label="No drifters: estimated from nearby cells only")]
+
+
+# Confidence tiers for the kriging map, for clients. A cell's tier depends on
+# how large the estimated current is compared with its uncertainty (the
+# signal-to-noise ratio, speed / vector SD). This says how well the current's
+# direction is known: the approximate 1-SD direction uncertainty is
+# arctan(sideways SD / speed), about ±20° at a ratio of 2 and ±35° at 1.
+GP_TIER_HIGH = 2.0        # ratio for "high": direction known to within about ±20°
+GP_TIER_MODERATE = 1.0    # ratio for "moderate": within about ±35°; below this, "low"
+GP_TIERS = ["low", "moderate", "high"]
+GP_TIER_COLORS = ["#d9d9d9", "#9ecae1", "#2171b5"]
+
+
+def add_gp_confidence(g, speed="gp_speed", sd="gp_sd_vector"):
+    """Add the signal-to-noise ratio, approximate direction uncertainty and
+    confidence tier to a table of kriging estimates (in place)."""
+    g["gp_signal_to_noise"] = g[speed] / g[sd]
+    g["gp_direction_sd_deg"] = np.degrees(np.arctan2(g[sd] / np.sqrt(2), g[speed]))
+    g["gp_confidence"] = pd.cut(g["gp_signal_to_noise"], [-np.inf, GP_TIER_MODERATE, GP_TIER_HIGH, np.inf],
+                                labels=GP_TIERS, right=False).astype(str)
+    return g
+
+
+def _simulate_mvn(mean, cov, n, rng):
+    """n random draws from a multivariate normal (robust to near-singular cov)."""
+    try:
+        L = cholesky(cov + 1e-10 * np.trace(cov) / len(cov) * np.eye(len(cov)), lower=True)
+    except np.linalg.LinAlgError:
+        w, V = np.linalg.eigh(cov)
+        L = V * np.sqrt(np.clip(w, 0.0, None))
+    return mean + rng.standard_normal((n, len(mean))) @ L.T
+
+
+def gp_simulated_angles(both, predictors, n=N_BOOT, seed=SEED):
+    """SW-to-NE direction change at the given cells in n plausible current
+    fields simulated from the fitted kriging model (rows = simulations)."""
+    rng = np.random.default_rng(seed)
+    xy = gp_xy_km(both["lon0"] + GRID / 2, both["lat0"] + GRID / 2)
+    sim = {}
+    for season in SEASONS:
+        for c in ("ve", "vn"):
+            sim[season, c] = _simulate_mvn(*predictors[season][c].joint(xy), n, rng)
+    return angle_between(sim["Southwest", "ve"], sim["Southwest", "vn"],
+                         sim["Northeast", "ve"], sim["Northeast", "vn"])
 
 
 def gp_analysis(per, grid, h_best):
@@ -2102,10 +2421,13 @@ def gp_analysis(per, grid, h_best):
     targets = ocean_cells()
     if targets is None:
         print("\nCoastline unavailable: the kriging map covers only cells drifters entered.")
-    parts = []
+    #    The fitted model can be evaluated anywhere, which the smooth maps use:
+    #    gp_eval(season, lon, lat) -> eastward/northward estimates and SDs.
+    parts, predictors = [], {}
     for season, p in fitted.items():
         r = rec[rec["monsoon"] == season]
         xy_r = gp_xy_km(r["lon0"] + GRID / 2, r["lat0"] + GRID / 2)
+        predictors[season] = {c: gp_predictor(xy_r, r[c], p[c]) for c in ("ve", "vn")}
         sampled = grid[grid["monsoon"] == season][["lon0", "lat0", "n_drifters", "sufficient", "confidence"]]
         if targets is None:
             g = sampled.copy()
@@ -2119,14 +2441,23 @@ def gp_analysis(per, grid, h_best):
         g["sufficient"] = g["sufficient"].fillna(False).astype(bool)
         g["confidence"] = g["confidence"].fillna("no drifters")
         xy_g = gp_xy_km(g["lon"], g["lat"])
-        g["gp_ve"], g["gp_sd_ve"] = gp_predict(xy_r, r["ve"], xy_g, p["ve"])
-        g["gp_vn"], g["gp_sd_vn"] = gp_predict(xy_r, r["vn"], xy_g, p["vn"])
+        for c in ("ve", "vn"):
+            g[f"gp_{c}"], g[f"gp_sd_{c}"] = predictors[season][c](xy_g)
         parts.append(g)
     gp = pd.concat(parts, ignore_index=True)
     gp["gp_speed"] = np.hypot(gp["gp_ve"], gp["gp_vn"])
+
+    def gp_eval(season, lon, lat, with_sd=False):
+        xy = gp_xy_km(lon, lat)
+        (ve, sd_ve), (vn, sd_vn) = (predictors[season][c](xy, with_sd) for c in ("ve", "vn"))
+        return ve, vn, sd_ve, sd_vn
+
     gp["gp_direction_deg"] = np.degrees(np.arctan2(gp["gp_vn"], gp["gp_ve"]))
     gp["gp_sd_vector"] = np.hypot(gp["gp_sd_ve"], gp["gp_sd_vn"])
+    add_gp_confidence(gp)
     save_table(gp, f"gp_grid_{ACTIVE}.csv")
+    print("\nKriging confidence tiers (cells):")
+    print(pd.crosstab(gp["monsoon"], gp["gp_confidence"]).reindex(columns=GP_TIERS, fill_value=0))
 
     print("\nCells on the kriging map:")
     for season in fitted:
@@ -2146,305 +2477,206 @@ def gp_analysis(per, grid, h_best):
             .join(entered[entered["monsoon"] == "Northeast"].set_index(["lon0", "lat0"]),
                   lsuffix="_sw", rsuffix="_ne", how="inner").reset_index())
     both["angle_change"] = angle_between(both["gp_ve_sw"], both["gp_vn_sw"], both["gp_ve_ne"], both["gp_vn_ne"])
-    reversal = {}
-    print("\nMonsoon reversal on the Gaussian process map (cells sampled in both seasons):")
+    # 95% interval for the percentages: simulate N_BOOT plausible current fields
+    # from the fitted model (each consistent with the data and its uncertainty,
+    # including how errors at nearby cells move together) and recompute the
+    # percentages on each one.
+    draws = gp_simulated_angles(both, predictors)
+    reversal, rows = {}, []
+    print(f"\nMonsoon reversal on the Gaussian process map (cells sampled in both seasons; "
+          f"95% interval from {N_BOOT} simulated fields):")
     for region, mask in [("Whole Bay of Bengal", np.ones(len(both), bool)),
-                         (f"Approx. EICC band {EICC_LON[0]:.0f}-{EICC_LON[1]:.0f}E", in_eicc(both["lon0"]))]:
+                         (f"Approx. EICC band {EICC_LON[0]:.0f}-{EICC_LON[1]:.0f}E",
+                          in_eicc(both["lon0"]).to_numpy())]:
         a = both.loc[mask, "angle_change"]
-        reversal[region] = {"cells": len(a), "gt90": (a > 90).mean() * 100, "gt135": (a > 135).mean() * 100}
-        print(f"  {region}: {len(a)} cells, > 90° {reversal[region]['gt90']:.1f}%, "
-              f"> 135° {reversal[region]['gt135']:.1f}%")
+        r = {"cells": len(a), "gt90": (a > 90).mean() * 100, "gt135": (a > 135).mean() * 100}
+        for t in (90, 135):
+            pct = (draws[:, mask] > t).mean(axis=1) * 100
+            r[f"gt{t}_median"], r[f"gt{t}_lo"], r[f"gt{t}_hi"] = np.percentile(pct, [50, 2.5, 97.5])
+        reversal[region] = r
+        rows.append({"dataset": ACTIVE, "region": region, **r})
+        print(f"  {region}: {len(a)} cells, > 90° {r['gt90']:.1f}% (simulation median {r['gt90_median']:.1f}%, "
+              f"95% interval {r['gt90_lo']:.1f}-{r['gt90_hi']:.1f}%), > 135° {r['gt135']:.1f}% "
+              f"(median {r['gt135_median']:.1f}%, 95% interval {r['gt135_lo']:.1f}-{r['gt135_hi']:.1f}%)")
+    save_table(pd.DataFrame(rows), "gp_reversal.csv")
 
-    # Figures: mean current and its uncertainty for every ocean cell, with the
-    # cells the main map would not show marked
-    show = gp.assign(ve=gp["gp_ve"], vn=gp["gp_vn"], speed=gp["gp_speed"], sufficient=True)
-    vmax = np.ceil(max(show["speed"].max(), grid.loc[grid["sufficient"], "speed"].max()) * 10) / 10
+    # Figures: mean current and its uncertainty as smooth fields over every
+    # mapped ocean cell, with arrows and markers for each 1° cell placed in the
+    # cell's sea part, so coastal cells do not put them on land.
+    marks = gp.drop(columns=["lon", "lat"]).merge(
+        sea_positions(gp[["lon0", "lat0"]].drop_duplicates()), on=["lon0", "lat0"])
+    sea = marks.dropna(subset=["lon"])
+    display = {}
+    for season in fitted:
+        points, area = display_points(gp[gp["monsoon"] == season])
+        ve, vn, sd_ve, sd_vn = gp_eval(season, points["lon"], points["lat"], with_sd=True)
+        display[season] = (points, np.hypot(ve, vn), np.hypot(sd_ve, sd_vn), area)
+    vmax = np.ceil(max(max(np.nanmax(d[1]) for d in display.values()),
+                       grid.loc[grid["sufficient"], "speed"].max()) * 10) / 10
     norm, cmap = Normalize(0, vmax), plt.get_cmap("YlGnBu")
     fig, axes = plt.subplots(1, 2, figsize=(16, 7.5), constrained_layout=True)
     for ax, season in zip(axes, SEASONS):
-        season_cell_map(ax, show[show["monsoon"] == season], "speed", cmap, norm, f"{season} monsoon", arrows=True)
-        gp_mark_coverage(ax, gp[gp["monsoon"] == season])
+        s = sea[sea["monsoon"] == season]
+        points, speed, _, area = display[season]
+        smooth_season_map(ax, points, speed, area, cmap, norm, f"{season} monsoon",
+                          arrows=s.assign(ve=s["gp_ve"], vn=s["gp_vn"]))
+        gp_mark_coverage(ax, s)
     add_land_legend(axes[0], gp_coverage_legend())
     add_colorbar(fig, axes, cmap, norm, "Mean current speed (m/s)")
     fig.suptitle(f"Gaussian process (kriging) mean surface circulation ({dataset_label()})", fontsize=15)
     save_fig(fig, "20_gp_circulation.png", dpi=300)
 
-    sd_show = gp.assign(sufficient=True)
-    sd_norm, sd_cmap = Normalize(0, sd_show["gp_sd_vector"].quantile(0.95)), plt.get_cmap("Oranges")
+    sd_all = np.concatenate([d[2] for d in display.values()])
+    sd_norm, sd_cmap = Normalize(0, np.nanquantile(sd_all, 0.95)), plt.get_cmap("Oranges")
     fig, axes = plt.subplots(1, 2, figsize=(16, 7.5), constrained_layout=True)
     for ax, season in zip(axes, SEASONS):
-        season_cell_map(ax, sd_show[sd_show["monsoon"] == season], "gp_sd_vector", sd_cmap, sd_norm,
-                        f"{season} monsoon")
-        gp_mark_coverage(ax, gp[gp["monsoon"] == season])
+        points, _, sd, area = display[season]
+        smooth_season_map(ax, points, sd, area, sd_cmap, sd_norm, f"{season} monsoon")
+        gp_mark_coverage(ax, sea[sea["monsoon"] == season])
     add_land_legend(axes[0], gp_coverage_legend())
     add_colorbar(fig, axes, sd_cmap, sd_norm, "Uncertainty of the mean current (m/s, vector SD)")
     fig.suptitle(f"Gaussian process uncertainty ({dataset_label()})", fontsize=15)
     save_fig(fig, "21_gp_uncertainty.png")
 
+    # Confidence tiers for clients: how well the current's direction is known
+    tier_norm = BoundaryNorm([0, GP_TIER_MODERATE, GP_TIER_HIGH, 1e9], len(GP_TIERS))
+    tier_cmap = ListedColormap(GP_TIER_COLORS)
+    fig, axes = plt.subplots(1, 2, figsize=(16, 7.5), constrained_layout=True)
+    for ax, season in zip(axes, SEASONS):
+        points, speed, sd, area = display[season]
+        draw_smooth(ax, points, speed / sd, area, tier_cmap, tier_norm,
+                    levels=[0, GP_TIER_MODERATE, GP_TIER_HIGH, 1e9])
+        add_land(ax)
+        setup_map(ax, f"{season} monsoon")
+        gp_mark_coverage(ax, sea[sea["monsoon"] == season])
+    tier_labels = [f"Low: direction uncertain (speed < {GP_TIER_MODERATE:g} x uncertainty)",
+                   f"Moderate: direction within about ±35° (speed {GP_TIER_MODERATE:g}-{GP_TIER_HIGH:g} x uncertainty)",
+                   f"High: direction within about ±20° (speed > {GP_TIER_HIGH:g} x uncertainty)"]
+    add_land_legend(axes[0], [Patch(facecolor=c, label=t) for c, t in zip(GP_TIER_COLORS, tier_labels)]
+                    + gp_coverage_legend(), fontsize=8)
+    fig.suptitle(f"Kriging confidence in the current direction ({dataset_label()})", fontsize=15)
+    save_fig(fig, "24_gp_confidence.png", dpi=200)
+
     return {"improvement": improvement, "ci": ci, "coverage": coverage, "rmse": overall,
-            "params": params, "reversal": reversal}
+            "params": params, "reversal": reversal, "grid": gp, "eval": gp_eval, "marks": marks}
 
 
-# ============================================================
-# Smooth temporal weighting (alternative to fixed seasons)
-# ============================================================
-# The main analysis uses fixed seasons: an observation in September counts
-# fully towards the Southwest monsoon and one in October not at all. Here each
-# calendar month gets its own map instead. Observations from every month are
-# used, weighted by how close their month is to the month being mapped: the
-# weight falls off as a Gaussian of the gap in months, measured around the
-# calendar so that December sits next to January. Observations from all years
-# are pooled, as in the main analysis.
-#
-# Drifters still count equally. Each drifter's observations in a cell are
-# averaged using the month weights, and the drifter then contributes with the
-# weight of its closest month, so a drifter seen in the target month counts
-# fully and one seen only two months away counts much less. A cell is mapped
-# when these weights add up to at least MIN_DRIFTERS, which is the same rule as
-# the main analysis when only the target month is used.
-#
-# The width of the Gaussian (sigma) is chosen by leave-one-drifter-out
-# cross-validation, and the result is compared with the fixed seasons on the
-# same test cases.
+def export_climatology(gp, grid, sst_grid):
+    """Write the ready-to-use gridded climatology for the active dataset as a
+    NetCDF file (outputs/<dataset>/bob_climatology_<dataset>.nc), on 1° cells
+    with dimensions season x lat x lon.
 
-MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-FIXED_SEASONS = "fixed seasons (main analysis)"
-TEMPORAL_KEY = ["target_month", "lon0", "lat0"]
+    The primary layers are the kriging estimates with their uncertainty and
+    confidence tier. The drifter-weighted raw grid (baseline, mapped cells
+    only) and the mean SST are included alongside, plus the SW-to-NE change in
+    current direction."""
+    section(f"CLIMATOLOGY DATASET ({dataset_label()})")
+    lats = np.arange(LAT_RANGE[0], LAT_RANGE[1], GRID) + GRID / 2
+    lons = np.arange(LON_RANGE[0], LON_RANGE[1], GRID) + GRID / 2
 
+    def layer(table, column, seasons=True, dtype=float, fill=np.nan):
+        """One column of a cell table as an array on the season x lat x lon grid."""
+        out = np.full(((len(SEASONS),) if seasons else ()) + (len(lats), len(lons)), fill, dtype=dtype)
+        t = table.dropna(subset=[column])
+        iy = np.round((t["lat0"] - LAT_RANGE[0]) / GRID).astype(int).to_numpy()
+        ix = np.round((t["lon0"] - LON_RANGE[0]) / GRID).astype(int).to_numpy()
+        if seasons:
+            out[t["monsoon"].map(SEASONS.index).to_numpy(), iy, ix] = t[column].to_numpy()
+        else:
+            out[iy, ix] = t[column].to_numpy()
+        return out
 
-def temporal_label(sigma):
-    """Readable name for one temporal weighting width."""
-    return "target month only" if sigma == 0 else f"Gaussian, sigma = {sigma:g} months"
+    dims, dims2 = ("season", "lat", "lon"), ("lat", "lon")
+    g = gp.copy()
+    g["bearing"] = (90.0 - g["gp_direction_deg"]) % 360            # compass bearing the current flows towards
+    g["tier_code"] = g["gp_confidence"].map({t: i for i, t in enumerate(GP_TIERS)})
+    raw = grid[grid["sufficient"]]
+    sst = sst_grid[sst_grid["sufficient"]]
+    entered = g[g["sampled"]].groupby(["lon0", "lat0"]).size()
+    pair = (g[g["monsoon"] == "Southwest"].set_index(["lon0", "lat0"])[["gp_ve", "gp_vn"]]
+            .join(g[g["monsoon"] == "Northeast"].set_index(["lon0", "lat0"])[["gp_ve", "gp_vn"]],
+                  lsuffix="_sw", rsuffix="_ne", how="inner").reset_index())
+    pair["angle_change"] = angle_between(pair["gp_ve_sw"], pair["gp_vn_sw"], pair["gp_ve_ne"], pair["gp_vn_ne"])
+    pair["in_headline"] = pair.set_index(["lon0", "lat0"]).index.map(
+        lambda k: entered.get(k, 0) == len(SEASONS)).astype(int)
 
+    def var(data, units, long_name, **extra):
+        return (dims if data.ndim == 3 else dims2, data, {"units": units, "long_name": long_name, **extra})
 
-def temporal_weights(sigma):
-    """12 x 12 weight table: row = month being mapped, column = month the
-    observation was made in. sigma = 0 uses the target month only."""
-    months = np.arange(12)
-    gap = np.abs(months[:, None] - months[None, :])
-    gap = np.minimum(gap, 12 - gap)             # distance around the calendar
-    if sigma == 0:
-        return (gap == 0).astype(float)
-    return np.exp(-0.5 * (gap / sigma) ** 2)
-
-
-def fixed_season_weights():
-    """The same table for the main analysis's fixed seasons: weight 1 for every
-    month in the same monsoon as the target month and 0 otherwise. Rows for
-    inter-monsoon months are all zero (those months are not mapped)."""
-    season = [SEASON_OF_MONTH.get(m) for m in range(1, 13)]
-    return np.array([[float(a is not None and a == b) for b in season] for a in season])
-
-
-def monthly_drifter_means(obs):
-    """Mean velocity of every drifter in every cell in each calendar month,
-    keeping drifters with at least MIN_OBS_PER_DRIFTER hourly observations
-    there. Every weighting scheme is built from these same records, so the
-    comparison between schemes is like-for-like."""
-    rec = (obs.groupby(["month", "lon0", "lat0", "drifter_id"])
-              .agg(ve=("ve", "mean"), vn=("vn", "mean"), n_obs=("ve", "count"))
-              .reset_index())
-    return rec[rec["n_obs"] >= MIN_OBS_PER_DRIFTER].reset_index(drop=True)
-
-
-def temporal_estimates(rec, weights):
-    """Temporally weighted, drifter-weighted cell means for every calendar month.
-
-    Returns one row per target month, cell and contributing drifter, holding
-    the drifter's weight, the cell estimate from all drifters, and the cell
-    estimate with that drifter left out (used for cross-validation)."""
-    parts = []
-    for target in range(1, 13):
-        w = weights[target - 1, rec["month"].to_numpy() - 1]
-        r = rec[w > 0].assign(w=w[w > 0])
-        if r.empty:
-            continue
-        r = r.assign(wve=r["w"] * r["ve"], wvn=r["w"] * r["vn"])
-        d = (r.groupby(["lon0", "lat0", "drifter_id"])
-              .agg(sum_w=("w", "sum"), wve=("wve", "sum"), wvn=("wvn", "sum"), weight=("w", "max"))
-              .reset_index())
-        d["target_month"] = target
-        parts.append(d)
-    d = pd.concat(parts, ignore_index=True)
-
-    # Each drifter's month-weighted mean, then the weighted average over drifters
-    d["ve_d"] = d["wve"] / d["sum_w"]
-    d["vn_d"] = d["wvn"] / d["sum_w"]
-    d["w_ve"] = d["weight"] * d["ve_d"]
-    d["w_vn"] = d["weight"] * d["vn_d"]
-    d["in_month"] = d["weight"] == 1.0          # drifter was observed in the target month itself
-    cell = d.groupby(TEMPORAL_KEY)
-    total_w = cell["weight"].transform("sum")
-    sum_ve = cell["w_ve"].transform("sum")
-    sum_vn = cell["w_vn"].transform("sum")
-    d["ve"] = sum_ve / total_w
-    d["vn"] = sum_vn / total_w
-    d["weighted_drifters"] = total_w
-    d["drifters_in_month"] = cell["in_month"].transform("sum")
-
-    # The same estimate with this drifter removed
-    rest_w = total_w - d["weight"]
-    with np.errstate(invalid="ignore", divide="ignore"):
-        d["ve_loo"] = np.where(rest_w > 1e-12, (sum_ve - d["w_ve"]) / rest_w, np.nan)
-        d["vn_loo"] = np.where(rest_w > 1e-12, (sum_vn - d["w_vn"]) / rest_w, np.nan)
-    d["weight_loo"] = rest_w
-    return d
-
-
-def temporal_grid(est):
-    """One row per month and cell from temporal_estimates, in the same layout as
-    the seasonal grids so the existing map functions can draw it."""
-    g = est.drop_duplicates(TEMPORAL_KEY)[
-        TEMPORAL_KEY + ["ve", "vn", "weighted_drifters", "drifters_in_month"]
-    ].rename(columns={"target_month": "month"}).reset_index(drop=True)
-    g["speed"] = np.hypot(g["ve"], g["vn"])
-    g["direction_deg"] = np.degrees(np.arctan2(g["vn"], g["ve"]))
-    g["sufficient"] = g["weighted_drifters"] >= MIN_DRIFTERS
-    g["lon"] = g["lon0"] + GRID / 2
-    g["lat"] = g["lat0"] + GRID / 2
-    return g.sort_values(["month", "lon0", "lat0"], ignore_index=True)
-
-
-def temporal_cv(rec, schemes):
-    """Leave-one-drifter-out test of each weighting scheme. For every drifter,
-    month and cell where it was observed, the drifter is removed, the cell is
-    estimated from the remaining drifters, and the estimate is compared with the
-    drifter's own mean velocity there. Returns the squared vector error of each
-    scheme per test case (NaN where the scheme cannot map the cell)."""
-    truth = rec.rename(columns={"month": "target_month", "ve": "ve_true", "vn": "vn_true"})
-    key = TEMPORAL_KEY + ["drifter_id"]
-    errors = truth[key].copy()
-    for label, weights in schemes.items():
-        est = temporal_estimates(rec, weights)
-        m = truth.merge(est[key + ["ve_loo", "vn_loo", "weight_loo"]], on=key, how="left")
-        sq = (m["ve_true"] - m["ve_loo"]) ** 2 + (m["vn_true"] - m["vn_loo"]) ** 2
-        errors[label] = np.where(m["weight_loo"] >= MIN_DRIFTERS, sq, np.nan)
-    return errors
-
-
-def temporal_score_table(errors, labels, months, scope):
-    """RMSE of each scheme, using only test cases that every scheme in labels
-    can map, so all schemes are scored on exactly the same cases."""
-    sub = errors[errors["target_month"].isin(months)].dropna(subset=labels)
-    return pd.DataFrame([{
-        "scope": scope, "method": label,
-        "rmse_vector_mps": np.sqrt(sub[label].mean()),
-        "n_test_cases": len(sub), "n_drifters": sub["drifter_id"].nunique(),
-    } for label in labels])
-
-
-def bootstrap_improvement(errors, new, old, seed=SEED):
-    """95% confidence interval for the % reduction in RMSE of scheme `new`
-    relative to scheme `old`, resampling whole drifters."""
-    per = errors.dropna(subset=[new, old]).groupby("drifter_id")[[new, old]].sum()
-    new_sq, old_sq = per[new].to_numpy(), per[old].to_numpy()
-    rng = np.random.default_rng(seed)
-    draws = []
-    for _ in range(N_BOOT):
-        w = np.bincount(rng.integers(0, len(per), len(per)), minlength=len(per))
-        draws.append(100 * (1 - np.sqrt((w * new_sq).sum() / (w * old_sq).sum())))
-    return np.percentile(draws, [2.5, 97.5])
-
-
-def temporal_weighting_analysis(data_all_months):
-    """Monthly circulation maps using smooth temporal weighting, with the
-    weighting width chosen by cross-validation and tested against the fixed
-    seasons. Uses the active dataset's observations from all twelve months."""
-    section(f"SMOOTH TEMPORAL WEIGHTING ({dataset_label()}, all months)")
-    rec = monthly_drifter_means(data_all_months)
-    print(f"Drifter-month-cell records: {len(rec)} from {rec['drifter_id'].nunique()} drifters")
-
-    # 1. Cross-validation of each weighting width, and of the fixed seasons
-    sigma_labels = [temporal_label(s) for s in TEMPORAL_SIGMAS]
-    schemes = {temporal_label(s): temporal_weights(s) for s in TEMPORAL_SIGMAS}
-    schemes[FIXED_SEASONS] = fixed_season_weights()
-    errors = temporal_cv(rec, schemes)
-    season_months = sorted(SEASON_OF_MONTH)
-    scores = pd.concat([
-        temporal_score_table(errors, sigma_labels, range(1, 13), "All months"),
-        temporal_score_table(errors, list(schemes), season_months, "SW + NE months"),
-    ], ignore_index=True)
-    print("\nLeave-one-drifter-out cross-validation (lower RMSE is better):")
-    print(scores.round(4).to_string(index=False))
-    save_table(scores, "temporal_weighting_cv.csv")
-
-    # Width with the lowest error over all twelve months
-    all_months = scores[scores["scope"] == "All months"].set_index("method")["rmse_vector_mps"]
-    best_sigma = min(TEMPORAL_SIGMAS, key=lambda s: all_months[temporal_label(s)])
-    best = temporal_label(best_sigma)
-    print(f"\nSelected weighting: {best}")
-
-    # Compare with the fixed seasons in the months both can map
-    in_seasons = scores[scores["scope"] == "SW + NE months"].set_index("method")["rmse_vector_mps"]
-    improvement = 100 * (1 - in_seasons[best] / in_seasons[FIXED_SEASONS])
-    ci = bootstrap_improvement(errors[errors["target_month"].isin(season_months)], best, FIXED_SEASONS)
-    print(f"SW + NE months: fixed seasons RMSE {in_seasons[FIXED_SEASONS]:.4f} m/s, "
-          f"{best} RMSE {in_seasons[best]:.4f} m/s, "
-          f"reduction {improvement:+.1f}% (95% CI {ci[0]:+.1f} to {ci[1]:+.1f}%)")
-    print("(The width is chosen on the same drifters it is tested on, so this "
-          "comparison is slightly optimistic for the temporal weighting.)")
-
-    # 2. Monthly climatology with the selected width
-    clim = temporal_grid(temporal_estimates(rec, temporal_weights(best_sigma)))
-    save_table(clim, f"monthly_climatology_{ACTIVE}.csv")
-    mapped = clim[clim["sufficient"]].groupby("month").size().reindex(range(1, 13), fill_value=0)
-    print("\nMapped cells per month: " +
-          ", ".join(f"{MONTH_NAMES[m - 1]} {n}" for m, n in mapped.items()))
-
-    # 3. Maps for all twelve months, on one shared speed scale
-    vmax = np.ceil(clim.loc[clim["sufficient"], "speed"].max() * 10) / 10
-    norm, cmap = Normalize(0, vmax), plt.get_cmap("YlGnBu")
-    fig, axes = plt.subplots(3, 4, figsize=(24, 17), constrained_layout=True)
-    for ax, month in zip(axes.flat, range(1, 13)):
-        season_cell_map(ax, clim[clim["month"] == month], "speed", cmap, norm,
-                        f"{MONTH_NAMES[month - 1]} ({SEASON_OF_MONTH.get(month, 'Inter-monsoon')})",
-                        arrows=True)
-    add_land_legend(axes[0, 0], [Patch(**INSUFFICIENT_STYLE,
-                                       label=f"Insufficient data (weighted drifters < {MIN_DRIFTERS})")],
-                    fontsize=8)
-    add_colorbar(fig, axes, cmap, norm, "Mean current speed (m/s)")
-    fig.suptitle(f"Monthly surface circulation with smooth temporal weighting "
-                 f"({best}, {dataset_label()})", fontsize=16)
-    save_fig(fig, "16_monthly_circulation.png")
-
-    # 4. Annual cycle of the northward current in the EICC band. Too few single
-    # cells are sampled in every month, so the whole band is treated as one
-    # region: the same weighting is applied to all drifter records in the band,
-    # giving one drifter-weighted mean per month.
-    band_rec = rec[in_eicc(rec["lon0"])].assign(lon0=EICC_LON[0], lat0=LAT_RANGE[0])
-
-    def band_cycle(weights):
-        g = temporal_grid(temporal_estimates(band_rec, weights)).set_index("month")
-        return g["vn"].where(g["sufficient"]), g["weighted_drifters"]
-
-    smooth_vn, smooth_n = band_cycle(temporal_weights(best_sigma))
-    fixed_vn, _ = band_cycle(fixed_season_weights())
-    cycle = pd.DataFrame({"smooth_vn": smooth_vn, "weighted_drifters": smooth_n,
-                          "fixed_vn": fixed_vn}).reindex(range(1, 13))
-    cycle.index.name = "month"
-    save_table(cycle, "eicc_monthly_cycle.csv", index=True)
-    print(f"\nEICC band {EICC_LON[0]:g}-{EICC_LON[1]:g}°E, mean northward velocity (m/s) by month:")
-    print(cycle.round(3).rename(index=dict(enumerate(MONTH_NAMES, 1))).T.to_string())
-
-    fig, ax = plt.subplots(figsize=(11, 5.5), constrained_layout=True)
-    for months, colour, label in [((6, 9), "coral", "Southwest months"), ((12, 12), "steelblue", None),
-                                  ((1, 2), "steelblue", "Northeast months")]:
-        ax.axvspan(months[0] - 0.5, months[1] + 0.5, color=colour, alpha=0.15, label=label)
-    ax.axhline(0, color="grey", linewidth=0.8)
-    ax.plot(cycle.index, cycle["smooth_vn"], "o-", color="black", label=f"Monthly ({best})")
-    for span in [(6, 9), (12, 12), (1, 2)]:
-        value = cycle.loc[span[0], "fixed_vn"]
-        ax.hlines(value, span[0] - 0.5, span[1] + 0.5, color="firebrick", linewidth=2.5,
-                  label=FIXED_SEASONS.capitalize() if span == (6, 9) else None)
-    ax.set_xticks(range(1, 13), labels=MONTH_NAMES)
-    ax.set(xlim=(0.5, 12.5), ylabel="Mean northward velocity (m/s)",
-           title=f"Annual cycle of the northward current, EICC band {EICC_LON[0]:g}-{EICC_LON[1]:g}°E "
-                 f"({dataset_label()})")
-    ax.legend(loc="best", fontsize=9)
-    save_fig(fig, "17_eicc_annual_cycle.png")
-
-    return {"best": best, "improvement": improvement, "ci": ci, "rmse": in_seasons}
+    ds = xr.Dataset(
+        {
+            # Primary result: kriging (Gaussian process regression)
+            "u": var(layer(g, "gp_ve"), "m s-1", "Eastward mean surface current (kriging)",
+                     standard_name="eastward_sea_water_velocity"),
+            "v": var(layer(g, "gp_vn"), "m s-1", "Northward mean surface current (kriging)",
+                     standard_name="northward_sea_water_velocity"),
+            "speed": var(layer(g, "gp_speed"), "m s-1", "Mean surface current speed (kriging)",
+                         standard_name="sea_water_speed"),
+            "direction": var(layer(g, "bearing"), "degree",
+                             "Direction the mean current flows towards, clockwise from north (kriging)",
+                             standard_name="direction_of_sea_water_velocity"),
+            "u_sd": var(layer(g, "gp_sd_ve"), "m s-1", "Standard deviation (uncertainty) of u"),
+            "v_sd": var(layer(g, "gp_sd_vn"), "m s-1", "Standard deviation (uncertainty) of v"),
+            "vector_sd": var(layer(g, "gp_sd_vector"), "m s-1", "Combined uncertainty of the current vector"),
+            "signal_to_noise": var(layer(g, "gp_signal_to_noise"), "1", "Current speed divided by vector_sd"),
+            "direction_sd": var(layer(g, "gp_direction_sd_deg"), "degree",
+                                "Approximate 1-SD uncertainty of the current direction"),
+            "confidence": var(layer(g, "tier_code", dtype=np.int8, fill=-1), "1",
+                              "Confidence in the current direction",
+                              flag_values=np.arange(len(GP_TIERS), dtype=np.int8), flag_meanings=" ".join(GP_TIERS),
+                              comment=f"high: speed > {GP_TIER_HIGH:g} x vector_sd (about ±20 deg); moderate: "
+                                      f"{GP_TIER_MODERATE:g}-{GP_TIER_HIGH:g} x (about ±35 deg); low: below"),
+            "n_drifters": var(layer(g, "n_drifters", dtype=np.int16, fill=0), "1",
+                              f"Drifters with >= {MIN_OBS_PER_DRIFTER} hourly observations in the cell"),
+            "sampled": var(layer(g, "sampled", dtype=np.int8, fill=0).astype(np.int8), "1",
+                           "1 if any drifter entered the cell this season; 0 = estimated from nearby cells only"),
+            # Baseline: drifter-weighted raw grid (mapped cells only)
+            "raw_u": var(layer(raw, "ve"), "m s-1", "Eastward current, drifter-weighted raw grid (baseline)"),
+            "raw_v": var(layer(raw, "vn"), "m s-1", "Northward current, drifter-weighted raw grid (baseline)"),
+            "raw_speed_se": var(layer(raw, "se_speed"), "m s-1",
+                                f"Bootstrap standard error of the raw-grid speed ({N_BOOT} drifter resamples)"),
+            # Sea surface temperature, drifter-weighted (mapped cells only)
+            "sst": var(layer(sst, "sst"), "degC", "Mean sea surface temperature (drifter-weighted)",
+                       standard_name="sea_surface_temperature"),
+            # Monsoon reversal
+            "reversal_angle": var(layer(pair, "angle_change", seasons=False), "degree",
+                                  "Change in current direction from the Southwest to the Northeast monsoon "
+                                  "(kriging; > 90 = reversed)"),
+            "reversal_in_headline": var(layer(pair, "in_headline", seasons=False, dtype=np.int8, fill=0)
+                                        .astype(np.int8), "1",
+                                        "1 if drifters entered the cell in both seasons (counted in the "
+                                        "headline reversal percentage)"),
+        },
+        coords={
+            "season": ("season", SEASONS, {"long_name": "Monsoon season",
+                                           "comment": "Southwest = June-September; Northeast = December-February"}),
+            "lat": ("lat", lats, {"units": "degrees_north", "long_name": "Latitude of cell centre"}),
+            "lon": ("lon", lons, {"units": "degrees_east", "long_name": "Longitude of cell centre"}),
+        },
+        attrs={
+            "title": f"Bay of Bengal monsoon surface current climatology ({dataset_label()})",
+            "summary": "Seasonal mean surface currents with uncertainty from NOAA Global Drifter Program hourly "
+                       "drifters, 1-degree cells. Primary layers: ordinary kriging (Gaussian process "
+                       "regression, Matern 3/2 covariance fitted by maximum likelihood) of drifter-weighted "
+                       "cell means. Baseline: drifter-weighted raw grid with bootstrap standard errors.",
+            "source": "NOAA GDP hourly drifter dataset via the clouddrift package",
+            "drifters": dataset_label(),
+            "geospatial_lat_min": LAT_RANGE[0], "geospatial_lat_max": LAT_RANGE[1],
+            "geospatial_lon_min": LON_RANGE[0], "geospatial_lon_max": LON_RANGE[1],
+            "cell_size_degrees": GRID,
+            "mapping_rule": f"Raw grid maps a cell with >= {MIN_DRIFTERS} drifters each with "
+                            f">= {MIN_OBS_PER_DRIFTER} hourly observations; kriging covers every cell at least "
+                            f"{GP_MIN_SEA_FRACTION:.0%} sea",
+            "history": f"Created {pd.Timestamp.now():%Y-%m-%d} by project3001.py",
+            "Conventions": "CF-1.8",
+        },
+    )
+    ds["confidence"].encoding["_FillValue"] = np.int8(-1)      # -1 = not mapped
+    path = os.path.join(OUT_DIR, f"bob_climatology_{ACTIVE}.nc")
+    ds.to_netcdf(path)
+    print(ds)
+    print(f"  -> {os.path.relpath(path, OUT_DIR)}")
+    return ds
 
 
 def run(dataset):
@@ -2489,16 +2721,16 @@ def run(dataset):
 
     # Spatial extensions: kernel smoothing, then the Gaussian process (kriging),
     # tested on the same held-out drifters
-    h_best = kernel_smoothing_analysis(per, grid)
+    h_best, kernel_grid, kernel_eval = kernel_smoothing_analysis(per, grid)
     gp = gp_analysis(per, grid, h_best)
 
     circulation_figures(grid)
     reversal = reversal_analysis(per, grid)
+    reversal_methods = reversal_by_method(grid, kernel_grid, kernel_eval, gp)
     baseline = interannual_baseline(data, per)
     sst_grid = sst_analysis(data)
-
-    # Alternative to fixed seasons: monthly maps with smooth temporal weighting
-    temporal = temporal_weighting_analysis(select_dataset(obs, dataset))
+    if gp is not None:
+        export_climatology(gp["grid"], grid, sst_grid)
 
     # Headline numbers: a readable summary.txt, plus headline.csv (one row),
     # which the comparison step reads to set the datasets side by side
@@ -2514,9 +2746,39 @@ def run(dataset):
         f"{obs['time'].min():%Y-%m} to {obs['time'].max():%Y-%m}",
         f"SW + NE observations: {len(season_obs)}; in this dataset: {len(data)} "
         f"({len(data) / len(season_obs) * 100:.1f}%) from {head['drifters']} drifters",
-        "",
-        "Mapped cells:",
     ]
+    # Primary result: the kriging map
+    if gp is not None:
+        lines += ["", "PRIMARY RESULT: kriging (Gaussian process) map"]
+        for region, r in gp["reversal"].items():
+            key = "eicc" if region.startswith("Approx. EICC") else "bay"
+            head.update({f"gp_{key}_cells_both": r["cells"],
+                         f"gp_{key}_reversed_pct": r["gt90"], f"gp_{key}_reversed_ci95_low": r["gt90_lo"],
+                         f"gp_{key}_reversed_ci95_high": r["gt90_hi"],
+                         f"gp_{key}_gt135_pct": r["gt135"], f"gp_{key}_gt135_ci95_low": r["gt135_lo"],
+                         f"gp_{key}_gt135_ci95_high": r["gt135_hi"]})
+            lines.append(f"  Reversal, {region}: > 90 deg in {r['gt90']:.1f}% of {r['cells']} cells "
+                         f"(simulation median {r['gt90_median']:.1f}%, 95% interval {r['gt90_lo']:.1f}-"
+                         f"{r['gt90_hi']:.1f}%); > 135 deg in {r['gt135']:.1f}% (median {r['gt135_median']:.1f}%, "
+                         f"95% interval {r['gt135_lo']:.1f}-{r['gt135_hi']:.1f}%)")
+        tiers = gp["grid"].groupby(["monsoon", "gp_confidence"]).size()
+        for season in SEASONS:
+            key = "sw" if season == "Southwest" else "ne"
+            counts = {t: int(tiers.get((season, t), 0)) for t in GP_TIERS}
+            head.update({f"gp_{key}_{t}_conf_cells": n for t, n in counts.items()})
+            lines.append(f"  {season} confidence tiers: " + ", ".join(f"{t} {n}" for t, n in counts.items())
+                         + " cells")
+        head.update({"gp_rmse_reduction_pct": gp["improvement"], "gp_rmse_reduction_ci95_low": gp["ci"][0],
+                     "gp_rmse_reduction_ci95_high": gp["ci"][1], "gp_coverage_95_pct": gp["coverage"]})
+        lengths = ", ".join(f"{r.monsoon} {r.component} {r.length_scale_km:.0f} km"
+                            for r in gp["params"].itertuples())
+        lines += [f"  Held-out test drifters: RMSE {gp['rmse']['Gaussian process']:.4f} m/s vs "
+                  f"{gp['rmse']['raw grid']:.4f} m/s for the raw grid, reduction {gp['improvement']:+.1f}% "
+                  f"(95% CI {gp['ci'][0]:+.1f} to {gp['ci'][1]:+.1f}%); {gp['coverage']:.0f}% of test values "
+                  f"inside the 95% interval",
+                  f"  Length scales: {lengths}",
+                  f"  Gridded climatology: bob_climatology_{dataset}.nc"]
+    lines += ["", "BASELINE: drifter-weighted raw grid", "Mapped cells:"]
     for season in SEASONS:
         k = kept[kept["monsoon"] == season]
         n_high = int((k["confidence"] == "high").sum())
@@ -2525,7 +2787,7 @@ def run(dataset):
         head.update({f"{key}_cells": len(k), f"{key}_high_conf_cells": n_high,
                      f"{key}_mean_sst_c": sst_kept.loc[sst_kept["monsoon"] == season, "sst"].mean()})
         lines.append(f"  {season}: {len(k)} cells ({n_high} high confidence), SST cells: {n_sst}")
-    lines += ["", "SW vs NE reversal (> 90 deg):"]
+    lines += ["", "Raw-grid reversal (> 90 deg, whole-drifter bootstrap):"]
     for _, r in reversal.iterrows():
         key = "eicc" if r["region"].startswith("Approx. EICC") else "bay"
         head.update({f"{key}_cells_both": r["cells_both_seasons"],
@@ -2548,26 +2810,12 @@ def run(dataset):
                      f"{t['sw_vs_sw_pct_median']:.1f}%, NE vs NE {t['ne_vs_ne_pct_median']:.1f}%; monsoon excess "
                      f"{t['monsoon_excess_pct_median']:.1f} points (95% range {t['monsoon_excess_pct_ci95_low']:.1f}"
                      f" to {t['monsoon_excess_pct_ci95_high']:.1f}), {t['monsoon_share_pct']:.0f}% of the reversal")
-    head.update({"temporal_best": temporal["best"], "temporal_rmse_reduction_pct": temporal["improvement"]})
-    lines += ["", "Smooth temporal weighting vs fixed seasons (leave-one-drifter-out, SW + NE months):",
-              f"  Selected: {temporal['best']}; RMSE {temporal['rmse'][temporal['best']]:.4f} m/s vs "
-              f"{temporal['rmse'][FIXED_SEASONS]:.4f} m/s for fixed seasons, reduction "
-              f"{temporal['improvement']:+.1f}% (95% CI {temporal['ci'][0]:+.1f} to {temporal['ci'][1]:+.1f}%)"]
-    if gp is not None:
-        bay = gp["reversal"]["Whole Bay of Bengal"]
-        head.update({"gp_rmse_reduction_pct": gp["improvement"], "gp_rmse_reduction_ci95_low": gp["ci"][0],
-                     "gp_rmse_reduction_ci95_high": gp["ci"][1], "gp_coverage_95_pct": gp["coverage"],
-                     "gp_bay_cells_both": bay["cells"], "gp_bay_reversed_pct": bay["gt90"],
-                     "gp_bay_gt135_pct": bay["gt135"]})
-        lengths = ", ".join(f"{r.monsoon} {r.component} {r.length_scale_km:.0f} km"
-                            for r in gp["params"].itertuples())
-        lines += ["", "Gaussian process (kriging) vs raw grid (held-out test drifters):",
-                  f"  RMSE {gp['rmse']['Gaussian process']:.4f} m/s vs {gp['rmse']['raw grid']:.4f} m/s, reduction "
-                  f"{gp['improvement']:+.1f}% (95% CI {gp['ci'][0]:+.1f} to {gp['ci'][1]:+.1f}%); "
-                  f"{gp['coverage']:.0f}% of test values inside the 95% interval",
-                  f"  Length scales: {lengths}",
-                  f"  Reversal on the GP map: > 90 deg in {bay['gt90']:.1f}% of {bay['cells']} cells, "
-                  f"> 135 deg in {bay['gt135']:.1f}%"]
+    lines += ["", "Reversal by mapping method (whole Bay; kriging is the primary result, the others baselines):"]
+    for r in reversal_methods[reversal_methods["region"] == "Whole Bay of Bengal"].itertuples():
+        lines.append(f"  {r.method}: > 90 deg in {r.reversed_gt90_pct:.1f}% of {r.cells} cells, "
+                     f"> 135 deg in {r.reversed_gt135_pct:.1f}%")
+        if r.method.startswith("Kernel smoothing"):
+            head.update({"kernel_bay_reversed_pct": r.reversed_gt90_pct, "kernel_bay_gt135_pct": r.reversed_gt135_pct})
     save_table(pd.DataFrame([head]), "headline.csv")
     text = "\n".join(lines)
     section("SUMMARY")
