@@ -1,0 +1,11 @@
+test,method,rmse_ms,pct_lower_than_baseline,n_points
+Hide drifters (5 folds of drifters),Baseline (1° grid),0.3655,0.0,2841
+Hide drifters (5 folds of drifters),Kernel smoothing (75 km),0.3563,2.5,2841
+Hide drifters (5 folds of drifters),"Kriging (Matern 3/2, actual positions)",0.3453,5.5,2841
+Hide drifters (5 folds of drifters),"Kriging (Matern 3/2, cell centres)",0.3584,1.9,2841
+Hide drifters (5 folds of drifters),"Kriging (exponential, actual positions)",0.3401,6.9,2841
+Hide drifters (5 folds of drifters),"Kriging (exponential, cell centres)",0.3581,2.0,2841
+Hide whole years (5 groups of years),Baseline (1° grid),0.4244,0.0,2492
+Hide whole years (5 groups of years),Kernel smoothing (75 km),0.4001,5.7,2492
+Hide whole years (5 groups of years),"Kriging (Matern 3/2, cell centres)",0.4086,3.7,2492
+Hide whole years (5 groups of years),"Kriging (exponential, actual positions)",0.412,2.9,2492
