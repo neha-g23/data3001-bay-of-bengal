@@ -6,3 +6,8 @@ __pycache__/
 # Bay of Bengal data subset (~70 MB). Created automatically on the first run,
 # or share a copy through a drive link.
 bob_subset.nc
+
+# Generated results (rebuilt by the scripts)
+outputs/
+report_outputs/
+figures/

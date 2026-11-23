@@ -6,11 +6,10 @@ DATA3001 group project (UNSW, 2026). We map how surface currents in the Bay of B
 
 | Path | What it does |
 |---|---|
-| `project3001.py` | Main pipeline: downloads and subsets the data with clouddrift, cleans it, builds the drifter-weighted 1° grid, and produces the EDA figures, the unsmoothed grid estimate and `outputs/` |
+| `project3001.py` | Main pipeline: downloads and subsets the data with clouddrift, cleans it, builds the drifter-weighted 1° grid, and writes the EDA figures and the unsmoothed grid estimate to `outputs/` |
 | `reversal_figures.py` | Kernel smoothing (75 km seasons, 100 km months), coverage rule, direction change, and the seasonal and monthly maps |
 | `method_comparison/` | Grid vs kernel smoothing vs kriging on held-out drifters and held-out years (report Table W); see its README |
 | `report_code/` | One numbered script per report figure and table, with its own README listing the command for each output. Also holds `reversal_uncertainty.py` (whole-drifter bootstrap and sensitivity tests) and `baseline_vs_kernel.py` (1° grid vs kernel smoothing on held-out drifters) |
-| `kernel_*.py` | Earlier kernel-smoothing development and checks |
 
 ## Setup
 
