@@ -24,7 +24,8 @@ base, fast0, rev0 = ru.summarise(full["Southwest"], full["Northeast"], grid)
 rng = np.random.default_rng(SEED)
 rows, agree, counted = [], np.zeros(grid.LAT.shape), np.zeros(grid.LAT.shape)
 for _ in range(NB):
-    f = {s: W[s].field(redraw(rng, nd)) for s in W}
+    cnt = redraw(rng, nd)                      # one redraw shared by both monsoons
+    f = {s: W[s].field(cnt) for s in W}
     res, fast, rev = ru.summarise(f["Southwest"], f["Northeast"], grid)
     rows.append(res); agree += fast & rev; counted += fast
 B = pd.DataFrame(rows)
