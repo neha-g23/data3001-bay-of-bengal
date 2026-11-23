@@ -10,8 +10,8 @@ Two regressions on the locations mapped in both monsoons (drogued drifters, 75 k
 150 km of other land, where "land" is approximated by grid points that no drifter
 came within 40 km of.
 
-Report: coastal minus offshore at similar speeds about -11 deg (95% range -23 to +17);
-faster currents turn about 17 deg further per 0.1 m/s (9-22).
+Report: coastal minus offshore at similar speeds about -11 deg (95% range -35 to +13);
+faster currents turn about 17 deg further per 0.1 m/s (9-21).
 Output: coast_same_speed.csv. Slow: about 2-3 s per redraw (default NB=400).
 """
 import os
