@@ -20,7 +20,7 @@ Outputs are written to `report_outputs/`.
 
 ## Run
 
-Run in this order (03 needs 01; 04 and 06 need 03):
+Run in this order (03 needs 01; 04 needs 03):
 
 ```bash
 python 01_headline_bootstrap.py
@@ -28,11 +28,9 @@ python 02_direction_change_map.py
 python 03_region_table.py
 python 04_region_map.py
 python 05_monthly_switch.py
-python 06_monthly_by_region.py
 python 07_q2_coast_distance.py
 python 08_q2_speed_turn.py
 python 09_eda_figures.py
-python 10_east_west_map.py
 python 11_q2_speed_turn_figure.py
 python 12_sensitivity_intervals.py
 python 13_bandwidth_cv.py
@@ -53,7 +51,6 @@ For a quick check, set fewer redraws: `NB=20 python 03_region_table.py`
 | `03_region_table.py` | Q1 region table (regions A–F) | `region_table.csv`, `regions.npy` |
 | `04_region_map.py` | Q1 map with regions outlined | `region_map.png` |
 | `05_monthly_switch.py` | Q1 Figure Z, monthly switch near coast vs offshore | `monthly_switch.png`, `monthly_turn.csv` |
-| `06_monthly_by_region.py` | Appendix: monthly switch by region | `monthly_switch_by_region.png`, `monthly_switch_regions_combined.png`, `monthly_regions.csv` |
 | `07_q2_coast_distance.py` | Q2 Table Y and Figure W (distance from the coast) | `q2_bands.csv`, `q2_coast_distance.png` |
 | `08_q2_speed_turn.py` | Q2 speed effect: +18° per 0.1 m/s at the same distance | `speed_turn.csv` |
 | `12_sensitivity_intervals.py` | Q3 Table Z: sensitivity tests (smoothing, speed, cut-offs, years, all drifters, coverage rule), each with a 95% CI | `sensitivity_intervals.csv` |
@@ -61,7 +58,6 @@ For a quick check, set fewer redraws: `NB=20 python 03_region_table.py`
 | `13_bandwidth_cv.py` | Methods Table M1: bandwidth selection by cross-validation (needs scikit-learn) | `bandwidth_cv.csv` |
 | `11_q2_speed_turn_figure.py` | Q2 figure: median turn against speed, near the coast and offshore | `speed_vs_turn.png` |
 | `09_eda_figures.py` | EDA Figures E1–E6 and Tables E1–E4 numbers | `eda_*.png`, `eda_numbers.json` |
-| `10_east_west_map.py` | East-west current map, drogued drifters | `east_west_drogued.png` |
 
 Other report results come from elsewhere in the repository:
 
@@ -80,4 +76,4 @@ Other report results come from elsewhere in the repository:
 - Seed 3001 is used everywhere, so reruns with the same `NB` give the same numbers.
 - Region boundaries are fixed lines (150 km from the coast, 10°N, 15°N, 88°E), and the
   coastline is a simplified hand-drawn line, so distances are approximate.
-- Months or regions with few drifters give wide ranges; scripts 05–06 flag them.
+- Months or regions with few drifters give wide ranges; script 05 prints the drifters available each month.

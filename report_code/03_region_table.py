@@ -9,7 +9,7 @@ Columns: drifters, reverses >90 deg (95% range), consistently reverses
 from 01_headline_bootstrap.py), reverses >135 deg (95% range), median turn
 (95% range), too slow (share excluded for < 0.1 m/s in either monsoon).
 
-Outputs: region_table.csv, regions.npy (region masks, used by 04 and 06).
+Outputs: region_table.csv, regions.npy (region masks, used by 04).
 """
 import os
 import numpy as np, pandas as pd
