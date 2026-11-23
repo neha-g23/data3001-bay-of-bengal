@@ -11,3 +11,4 @@ scipy==1.18.1
 matplotlib==3.11.2
 Cartopy==0.26.0
 shapely==2.2.0
+scikit-learn>=1.5  # only for the kriging comparison and Table M1
