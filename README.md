@@ -6,10 +6,10 @@ DATA3001 group project (UNSW, 2026). We map how surface currents in the Bay of B
 
 | Path | What it does |
 |---|---|
-| `project3001.py` | Main pipeline: downloads and subsets the data with clouddrift, cleans it, builds the drifter-weighted 1° grid, and writes the EDA figures and the unsmoothed grid estimate to `outputs/` |
+| `project3001.py` | Main pipeline: downloads and subsets the data with clouddrift, cleans it, builds the drifter-weighted 1° grid, and writes the 1° grid map (Figure M1) and the unsmoothed grid estimate to `outputs/`; see below for what else the report uses from it |
 | `reversal_figures.py` | Kernel smoothing (75 km seasons, 100 km months), coverage rule, direction change, and the seasonal and monthly maps |
 | `method_comparison/` | Grid vs kernel smoothing vs kriging on held-out drifters and held-out years (report Table W); see its README |
-| `report_code/` | One numbered script per report figure and table, with its own README listing the command for each output. Also holds `reversal_uncertainty.py` (whole-drifter bootstrap and sensitivity tests) and `baseline_vs_kernel.py` (1° grid vs kernel smoothing on held-out drifters) |
+| `report_code/` | One script per report figure and table, named by report section (e.g. `3_4_...`, `4_1_q1_...`), with a README mapping every report item to its script. Also holds `reversal_uncertainty.py` (whole-drifter bootstrap and sensitivity tests) |
 
 ## Setup
 
@@ -26,20 +26,28 @@ The data are not stored here (about 70 MB). Running `python project3001.py` down
 
 ## Reproducing the report
 
-| Report item | Command |
-|---|---|
-| EDA (Figure E1, Table E1), unsmoothed 1° grid (67%), Figures M1–M2 | `python project3001.py` and `python report_code/09_eda_figures.py` |
-| Seasonal maps (Figure M4), direction change (Figure R) | `python reversal_figures.py --data bob_subset.nc --out figures`, `python report_code/02_direction_change_map.py` |
-| Bandwidth choice (Table M1) | `python report_code/13_bandwidth_cv.py` |
-| Kernel vs kriging diagram (Figure M3) | `python report_code/14_kriging_diagram.py` |
-| Headline 82% (95% CI 72–88%), consistency map (Figure U) | `python report_code/01_headline_bootstrap.py` |
-| Regions (Table X, Figure X) | `python report_code/03_region_table.py`, `04_region_map.py` |
-| Distance from the coast (Table Y, Figure W), speed effect (Figure S) | `07_q2_coast_distance.py`, `08_q2_speed_turn.py`, `11_q2_speed_turn_figure.py` |
-| Monthly switch (Figure Z, Table V) | `05_monthly_switch.py`, `15_monthly_turn_table.py` |
-| Sensitivity tests (Table Z) | `python report_code/12_sensitivity_intervals.py` |
-| Method comparison (Table W) | `PYTHONPATH=report_code:method_comparison/scripts python method_comparison/scripts/kyear.py` (see its README) |
+```bash
+python project3001.py                     # download data -> bob_subset.nc, Figure M1, unsmoothed 1° grid (67%)
+python reversal_figures.py --data bob_subset.nc --out figures   # Figure M4 (seasonal_speed_drogued.png)
+export BOB_DATA=$PWD/bob_subset.nc
+bash report_code/run_all.sh               # every other figure and table (about an hour)
+```
 
-`bash report_code/run_all.sh` runs every report script in order (30–60 minutes, mostly the bootstraps). All random draws use seed 3001, so reruns give the same numbers; set `NB=20` for a quick check with fewer redraws.
+The scripts in `report_code/` are named after the report section they belong to
+(for example `4_2_q2_coast_distance.py` makes Table Y and Figure W in Section 4.2).
+**[`report_code/README.md`](report_code/README.md) has a table mapping every figure,
+table and quoted number in the report to the script and output file that makes it.**
+All random draws use seed 3001, so reruns give the same numbers; set `NB=20` for a
+quick check with fewer redraws.
+
+## What the report uses from `project3001.py`
+
+`project3001.py` is the team's original end-to-end pipeline. The report uses three
+things from it: the data download and Bay of Bengal subset (`bob_subset.nc`, which every
+other script reads), the drifter-weighted 1° grid map (Figure M1, `06_circulation.png`)
+and the unsmoothed 1° grid reversal share (67%, Section 4.3). It also writes many
+exploratory figures that informed the project but are not in the final report; these
+are kept so the full workflow can be followed, not because the report depends on them.
 
 ## Reuse
 
