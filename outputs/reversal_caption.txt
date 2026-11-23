@@ -1,2 +1,0 @@
-Whole Bay of Bengal (151 cells): > 90° change in 67% (bootstrap median 64%, 95% CI 55-74%); > 135° change in 33% (bootstrap median 34%, 95% CI 26-44%).
-Approx. EICC band 80-85E (39 cells): > 90° change in 62% (bootstrap median 60%, 95% CI 42-74%) - not clearly different from the 50% expected by chance; > 135° change in 26% (bootstrap median 33%, 95% CI 18-48%) - not clearly different from the 25% expected by chance.

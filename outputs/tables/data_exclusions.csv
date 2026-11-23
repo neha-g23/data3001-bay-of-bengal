@@ -1,7 +1,0 @@
-step,removed,remaining
-raw observations,0,866511
-missing time / position / velocity,0,866511
-speed > 3.0 m/s,6,866505
-duplicate drifter + time,0,866505
-inter-monsoon months (analysis only),331353,535152
-undrogued (main analysis only),198652,336500
